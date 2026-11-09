@@ -53,10 +53,10 @@ def cargar_datos_gsheet(worksheet_name, columnas_defecto):
             if col not in df.columns:
                 df[col] = 0.0 if "CRC" in col or "USD" in col else ""
         
-        # Forzar conversión a texto en campos descriptivos para evitar bloqueo de solo números
-        for col in ["Empresa", "Cedula", "Cedula_Juridica", "Nombre", "Puesto", "Contacto"]:
+        # Forzar conversión a texto en campos descriptivos
+        for col in ["Empresa", "Cedula", "Cedula_Juridica", "Nombre", "Puesto", "Contacto", "Fecha_Ingreso", "Fecha_Salida"]:
             if col in df.columns:
-                df[col] = df[col].astype(str).replace("nan", "").replace("None", "")
+                df[col] = df[col].astype(str).replace(["nan", "None", "<NA>"], "")
         return df
     except Exception:
         return pd.DataFrame(columns=columnas_defecto)
@@ -64,7 +64,6 @@ def cargar_datos_gsheet(worksheet_name, columnas_defecto):
 def guardar_datos_gsheet(df, worksheet_name):
     try:
         conn = get_gsheet_connection()
-        # Asegurar conversión limpia a texto antes de enviar a Google Sheets
         for col in df.columns:
             if df[col].dtype == object:
                 df[col] = df[col].astype(str).fillna("")
@@ -267,7 +266,6 @@ if menu == "1. Catálogo de Empresas y Empleados":
 
     with tab1:
         st.subheader("Base de Datos de Empresas (Nube)")
-        # Configuración explícita de columnas como TEXTO LIBRE
         df_emp_edited = st.data_editor(
             df_emp,
             num_rows="dynamic",
@@ -293,6 +291,10 @@ if menu == "1. Catálogo de Empresas y Empleados":
         else:
             emp_sel_padron = st.selectbox("Seleccione la Empresa:", empresas_list)
             df_sub_empld = df_empld[df_empld["Empresa"] == emp_sel_padron].copy()
+            
+            # Quitar la columna Empresa para evitar redundancia y error de deshabilitar campos
+            if "Empresa" in df_sub_empld.columns:
+                df_sub_empld = df_sub_empld.drop(columns=["Empresa"])
 
             df_sub_edited = st.data_editor(
                 df_sub_empld,
@@ -300,7 +302,6 @@ if menu == "1. Catálogo de Empresas y Empleados":
                 use_container_width=True,
                 key=f"editor_empld_{emp_sel_padron}",
                 column_config={
-                    "Empresa": st.column_config.TextColumn("Empresa", disabled=True),
                     "Cedula": st.column_config.TextColumn("Cédula Colaborador", required=True),
                     "Nombre": st.column_config.TextColumn("Nombre Completo", required=True),
                     "Puesto": st.column_config.TextColumn("Puesto / Cargo"),
