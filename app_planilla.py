@@ -52,6 +52,11 @@ def cargar_datos_gsheet(worksheet_name, columnas_defecto):
         for col in columnas_defecto:
             if col not in df.columns:
                 df[col] = 0.0 if "CRC" in col or "USD" in col else ""
+        
+        # Forzar conversión a texto en campos descriptivos para evitar bloqueo de solo números
+        for col in ["Empresa", "Cedula", "Cedula_Juridica", "Nombre", "Puesto", "Contacto"]:
+            if col in df.columns:
+                df[col] = df[col].astype(str).replace("nan", "").replace("None", "")
         return df
     except Exception:
         return pd.DataFrame(columns=columnas_defecto)
@@ -59,6 +64,10 @@ def cargar_datos_gsheet(worksheet_name, columnas_defecto):
 def guardar_datos_gsheet(df, worksheet_name):
     try:
         conn = get_gsheet_connection()
+        # Asegurar conversión limpia a texto antes de enviar a Google Sheets
+        for col in df.columns:
+            if df[col].dtype == object:
+                df[col] = df[col].astype(str).fillna("")
         conn.update(worksheet=worksheet_name, data=df)
         st.cache_data.clear()
         return True
@@ -258,7 +267,18 @@ if menu == "1. Catálogo de Empresas y Empleados":
 
     with tab1:
         st.subheader("Base de Datos de Empresas (Nube)")
-        df_emp_edited = st.data_editor(df_emp, num_rows="dynamic", use_container_width=True, key="editor_empresas")
+        # Configuración explícita de columnas como TEXTO LIBRE
+        df_emp_edited = st.data_editor(
+            df_emp,
+            num_rows="dynamic",
+            use_container_width=True,
+            key="editor_empresas",
+            column_config={
+                "Empresa": st.column_config.TextColumn("Nombre de la Empresa", required=True),
+                "Cedula_Juridica": st.column_config.TextColumn("Cédula Jurídica / Dimex"),
+                "Contacto": st.column_config.TextColumn("Contacto / Observaciones"),
+            }
+        )
         if st.button("💾 Sincronizar Catálogo de Empresas"):
             if guardar_datos_gsheet(df_emp_edited, "Empresas"):
                 st.success("✅ Catálogo de Empresas actualizado y sincronizado.")
@@ -266,10 +286,10 @@ if menu == "1. Catálogo de Empresas y Empleados":
 
     with tab2:
         st.subheader("Base de Datos de Empleados (Nube)")
-        empresas_list = sorted(df_emp_edited["Empresa"].dropna().unique().tolist())
+        empresas_list = sorted([str(e) for e in df_emp_edited["Empresa"].dropna().unique() if str(e).strip() != ""])
         
         if not empresas_list:
-            st.warning("Primero registre al menos una empresa en el catálogo.")
+            st.warning("Primero registre al menos una empresa en el catálogo de la pestaña anterior.")
         else:
             emp_sel_padron = st.selectbox("Seleccione la Empresa:", empresas_list)
             df_sub_empld = df_empld[df_empld["Empresa"] == emp_sel_padron].copy()
@@ -278,7 +298,15 @@ if menu == "1. Catálogo de Empresas y Empleados":
                 df_sub_empld,
                 num_rows="dynamic",
                 use_container_width=True,
-                key=f"editor_empld_{emp_sel_padron}"
+                key=f"editor_empld_{emp_sel_padron}",
+                column_config={
+                    "Empresa": st.column_config.TextColumn("Empresa", disabled=True),
+                    "Cedula": st.column_config.TextColumn("Cédula Colaborador", required=True),
+                    "Nombre": st.column_config.TextColumn("Nombre Completo", required=True),
+                    "Puesto": st.column_config.TextColumn("Puesto / Cargo"),
+                    "Fecha_Ingreso": st.column_config.TextColumn("Fecha Ingreso (DD/MM/AAAA)"),
+                    "Fecha_Salida": st.column_config.TextColumn("Fecha Salida / Activo"),
+                }
             )
 
             if st.button(f"💾 Sincronizar Padrón de {emp_sel_padron}"):
@@ -298,7 +326,7 @@ elif menu == "2. Salarios a Ingresar (Planilla)":
     df_empld = cargar_datos_gsheet("Empleados", ["Empresa", "Cedula", "Nombre", "Puesto", "Fecha_Ingreso", "Fecha_Salida"])
     df_hist = cargar_datos_gsheet("Datos_Historicos", COLUMNAS_HISTORICO)
 
-    empresas_list = sorted(df_emp["Empresa"].dropna().unique().tolist())
+    empresas_list = sorted([str(e) for e in df_emp["Empresa"].dropna().unique() if str(e).strip() != ""])
 
     if not empresas_list:
         st.warning("⚠️ No hay empresas registradas en Google Sheets. Vaya al Módulo 1 para agregarlas.")
@@ -308,7 +336,7 @@ elif menu == "2. Salarios a Ingresar (Planilla)":
             empresa_activa = st.selectbox("Seleccione la Empresa:", empresas_list)
 
         df_colabs = df_empld[df_empld["Empresa"] == empresa_activa]
-        lista_colabs = sorted(df_colabs["Nombre"].dropna().unique().tolist())
+        lista_colabs = sorted([str(n) for n in df_colabs["Nombre"].dropna().unique() if str(n).strip() != ""])
 
         if not lista_colabs:
             st.warning(f"La empresa '{empresa_activa}' no tiene empleados en el catálogo.")
@@ -456,7 +484,7 @@ elif menu == "3. Costo CCSS Patronal por Empresa":
     if df_hist.empty:
         st.warning("No hay registros almacenados.")
     else:
-        empresas_disponibles = sorted(df_hist["Empresa"].dropna().unique())
+        empresas_disponibles = sorted([str(e) for e in df_hist["Empresa"].dropna().unique() if str(e).strip() != ""])
         empresa_sel = st.selectbox("Seleccione la Empresa:", empresas_disponibles)
 
         df_emp = df_hist[df_hist["Empresa"] == empresa_sel].copy()
@@ -494,7 +522,7 @@ elif menu == "3. Costo CCSS Patronal por Empresa":
         st.subheader("✍️ Responsables de Firma para el Reporte")
         col_f1, col_f2 = st.columns(2)
         with col_f1:
-            elaborado_por = st.text_input("Elaborado por:", value="Oficial de Cumplimiento")
+            elaborado_por = st.text_input("Elaborado por:", value="Lic. Roy F. Esquivel González")
         with col_f2:
             revisado_por = st.text_input("Revisado por:", value="Gerencia General")
 
@@ -529,6 +557,8 @@ elif menu == "4. Gestor de Registros Históricos":
             num_rows="dynamic",
             use_container_width=True,
             column_config={
+                "Empresa": st.column_config.TextColumn("Empresa"),
+                "Nombre": st.column_config.TextColumn("Nombre"),
                 "Mes": st.column_config.SelectboxColumn("Mes", options=MESES),
                 "Moneda": st.column_config.SelectboxColumn("Moneda", options=["CRC", "USD"]),
                 "Salario_Mensual_CRC": st.column_config.NumberColumn("Salario Mensual CRC", format="₡%.2f"),
@@ -559,7 +589,7 @@ elif menu == "5. Reportes y Exportación":
         df_hist["Fecha_Ingreso"] = df_hist["Fecha_Ingreso"].fillna("N/A").astype(str)
         df_hist["Fecha_Salida"] = df_hist["Fecha_Salida"].fillna("Activo").astype(str)
 
-        empresas_disponibles = sorted(df_hist["Empresa"].dropna().unique())
+        empresas_disponibles = sorted([str(e) for e in df_hist["Empresa"].dropna().unique() if str(e).strip() != ""])
         empresa_sel = st.selectbox("Seleccione la Empresa a Consultar:", empresas_disponibles)
 
         df_emp = df_hist[df_hist["Empresa"] == empresa_sel].copy()
@@ -610,7 +640,7 @@ elif menu == "5. Reportes y Exportación":
             st.subheader("✍️ Responsables de Firma para los Reportes")
             col_f1, col_f2 = st.columns(2)
             with col_f1:
-                elaborado_por = st.text_input("Elaborado por:", value="Oficial de Cumplimiento", key="el_rep")
+                elaborado_por = st.text_input("Elaborado por:", value="Lic. Roy F. Esquivel González", key="el_rep")
             with col_f2:
                 revisado_por = st.text_input("Revisado por:", value="Gerencia General", key="rev_rep")
 
