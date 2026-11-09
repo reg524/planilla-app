@@ -19,9 +19,6 @@ st.set_page_config(
     layout="wide",
 )
 
-# Nombre de la Hoja de Google Sheets
-NOMBRE_LIBRO_GSHEETS = "Base_Datos_Planilla"
-
 # Porcentajes según normativa de Costa Rica
 PORCENTAJE_CCSS_OBRERO = 0.1067   # 10.67% CCSS Trabajador
 PORCENTAJE_CCSS_PATRONAL = 0.2650  # 26.50% Cargas Sociales Patronales
