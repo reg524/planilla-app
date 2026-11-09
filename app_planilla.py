@@ -1,6 +1,5 @@
 import datetime
 import io
-import os
 import xml.etree.ElementTree as ET
 import pandas as pd
 import requests
@@ -11,6 +10,7 @@ from reportlab.lib.pagesizes import letter, landscape
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 import streamlit as st
+from streamlit_gsheets import GSheetsConnection
 
 # Configuración de página en Streamlit
 st.set_page_config(
@@ -19,9 +19,8 @@ st.set_page_config(
     layout="wide",
 )
 
-ARCHIVO_HISTORICO = "planilla_acumulada.xlsx"
-ARCHIVO_EMPRESAS = "catalogo_empresas.xlsx"
-ARCHIVO_EMPLEADOS = "catalogo_empleados.xlsx"
+# Nombre de la Hoja de Google Sheets
+NOMBRE_LIBRO_GSHEETS = "Base_Datos_Planilla"
 
 # Porcentajes según normativa de Costa Rica
 PORCENTAJE_CCSS_OBRERO = 0.1067   # 10.67% CCSS Trabajador
@@ -43,23 +42,32 @@ COLUMNAS_HISTORICO = [
     "Aguinaldo_CRC", "Vacaciones_CRC", "Cesantia_CRC", "Total_Prestaciones_CRC"
 ]
 
-# --- GESTIÓN DE BASES DE DATOS EXCEL ---
+# --- CONEXIÓN DIRECTA A GOOGLE SHEETS EN LA NUBE ---
 
-def cargar_excel(ruta, columnas):
-    if os.path.exists(ruta):
-        try:
-            df = pd.read_excel(ruta)
-            for col in columnas:
-                if col not in df.columns:
-                    df[col] = 0.0 if "CRC" in col or "USD" in col else ""
-            return df
-        except Exception:
-            pass
-    return pd.DataFrame(columns=columnas)
+@st.cache_resource
+def get_gsheet_connection():
+    return st.connection("gsheets", type=GSheetsConnection)
 
-def guardar_excel(df, ruta):
-    with pd.ExcelWriter(ruta, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False)
+def cargar_datos_gsheet(worksheet_name, columnas_defecto):
+    try:
+        conn = get_gsheet_connection()
+        df = conn.read(worksheet=worksheet_name, ttl=5)
+        for col in columnas_defecto:
+            if col not in df.columns:
+                df[col] = 0.0 if "CRC" in col or "USD" in col else ""
+        return df
+    except Exception:
+        return pd.DataFrame(columns=columnas_defecto)
+
+def guardar_datos_gsheet(df, worksheet_name):
+    try:
+        conn = get_gsheet_connection()
+        conn.update(worksheet=worksheet_name, data=df)
+        st.cache_data.clear()
+        return True
+    except Exception as e:
+        st.error(f"Error al guardar en Google Sheets: {e}")
+        return False
 
 
 def asegurar_calculos_historico(df):
@@ -228,7 +236,7 @@ def generar_pdf_empresa(df_emp, nombre_empresa, titulo_reporte, elaborado_por, r
 
 
 # --- BARRA LATERAL ---
-st.sidebar.title("Módulos del Sistema")
+st.sidebar.title("Módulos del Sistema (Sincronizado)")
 
 menu = st.sidebar.radio(
     "Seleccione el Menú:",
@@ -244,34 +252,31 @@ menu = st.sidebar.radio(
 # --- MÓDULO 1: CATÁLOGO DE EMPRESAS Y EMPLEADOS ---
 if menu == "1. Catálogo de Empresas y Empleados":
     st.title("1. Administración de Empresas y Colaboradores")
-    st.caption("Registre, modifique o elimine empresas y su personal para evitar digitar datos repetidamente.")
+    st.caption("Los datos guardados aquí se sincronizan inmediatamente en Google Sheets.")
 
-    df_emp = cargar_excel(ARCHIVO_EMPRESAS, ["Empresa", "Cedula_Juridica", "Contacto"])
-    df_empld = cargar_excel(ARCHIVO_EMPLEADOS, ["Empresa", "Cedula", "Nombre", "Puesto", "Fecha_Ingreso", "Fecha_Salida"])
+    df_emp = cargar_datos_gsheet("Empresas", ["Empresa", "Cedula_Juridica", "Contacto"])
+    df_empld = cargar_datos_gsheet("Empleados", ["Empresa", "Cedula", "Nombre", "Puesto", "Fecha_Ingreso", "Fecha_Salida"])
 
     tab1, tab2 = st.tabs(["🏢 Catálogo de Empresas", "👤 Padrón de Empleados por Empresa"])
 
     with tab1:
-        st.subheader("Bases de Datos de Empresas")
-        st.info("💡 Puede agregar empresas nuevas abajo o editar/eliminar directamente en la tabla.")
-        
+        st.subheader("Base de Datos de Empresas (Nube)")
         df_emp_edited = st.data_editor(df_emp, num_rows="dynamic", use_container_width=True, key="editor_empresas")
-        if st.button("💾 Guardar Catálogo de Empresas"):
-            guardar_excel(df_emp_edited, ARCHIVO_EMPRESAS)
-            st.success("✅ Catálogo de Empresas actualizado correctamente.")
-            st.rerun()
+        if st.button("💾 Sincronizar Catálogo de Empresas"):
+            if guardar_datos_gsheet(df_emp_edited, "Empresas"):
+                st.success("✅ Catálogo de Empresas actualizado y sincronizado.")
+                st.rerun()
 
     with tab2:
-        st.subheader("Bases de Datos de Empleados")
+        st.subheader("Base de Datos de Empleados (Nube)")
         empresas_list = sorted(df_emp_edited["Empresa"].dropna().unique().tolist())
         
         if not empresas_list:
-            st.warning("Primero registre al menos una empresa en la pestaña 'Catálogo de Empresas'.")
+            st.warning("Primero registre al menos una empresa en el catálogo.")
         else:
-            emp_sel_padron = st.selectbox("Seleccione la Empresa para gestionar su personal:", empresas_list)
+            emp_sel_padron = st.selectbox("Seleccione la Empresa:", empresas_list)
             df_sub_empld = df_empld[df_empld["Empresa"] == emp_sel_padron].copy()
 
-            st.info(f"💡 Padrón de Empleados asignados a: **{emp_sel_padron}**")
             df_sub_edited = st.data_editor(
                 df_sub_empld,
                 num_rows="dynamic",
@@ -279,27 +284,27 @@ if menu == "1. Catálogo de Empresas y Empleados":
                 key=f"editor_empld_{emp_sel_padron}"
             )
 
-            if st.button(f"💾 Guardar Padrón de {emp_sel_padron}"):
+            if st.button(f"💾 Sincronizar Padrón de {emp_sel_padron}"):
                 df_otros = df_empld[df_empld["Empresa"] != emp_sel_padron]
                 df_sub_edited["Empresa"] = emp_sel_padron
                 df_final_empld = pd.concat([df_otros, df_sub_edited], ignore_index=True)
-                guardar_excel(df_final_empld, ARCHIVO_EMPLEADOS)
-                st.success(f"✅ Personal de **{emp_sel_padron}** guardado con éxito.")
-                st.rerun()
+                if guardar_datos_gsheet(df_final_empld, "Empleados"):
+                    st.success(f"✅ Personal de **{emp_sel_padron}** sincronizado en la nube.")
+                    st.rerun()
 
 # --- MÓDULO 2: SALARIOS A INGRESAR (PLANILLA) ---
 elif menu == "2. Salarios a Ingresar (Planilla)":
     st.title("2. Salarios a Ingresar")
-    st.caption("Alimentación periódica de salarios con cálculo automático de CCSS y Prestaciones en tiempo real.")
+    st.caption("Alimentación de salarios con sincronización remota instantánea.")
 
-    df_emp = cargar_excel(ARCHIVO_EMPRESAS, ["Empresa", "Cedula_Juridica", "Contacto"])
-    df_empld = cargar_excel(ARCHIVO_EMPLEADOS, ["Empresa", "Cedula", "Nombre", "Puesto", "Fecha_Ingreso", "Fecha_Salida"])
-    df_hist = cargar_excel(ARCHIVO_HISTORICO, COLUMNAS_HISTORICO)
+    df_emp = cargar_datos_gsheet("Empresas", ["Empresa", "Cedula_Juridica", "Contacto"])
+    df_empld = cargar_datos_gsheet("Empleados", ["Empresa", "Cedula", "Nombre", "Puesto", "Fecha_Ingreso", "Fecha_Salida"])
+    df_hist = cargar_datos_gsheet("Datos_Historicos", COLUMNAS_HISTORICO)
 
     empresas_list = sorted(df_emp["Empresa"].dropna().unique().tolist())
 
     if not empresas_list:
-        st.warning("⚠️ No hay empresas registradas. Vaya al módulo '1. Catálogo de Empresas y Empleados' para crear una.")
+        st.warning("⚠️ No hay empresas registradas en Google Sheets. Vaya al Módulo 1 para agregarlas.")
     else:
         col_emp1, col_emp2 = st.columns(2)
         with col_emp1:
@@ -309,7 +314,7 @@ elif menu == "2. Salarios a Ingresar (Planilla)":
         lista_colabs = sorted(df_colabs["Nombre"].dropna().unique().tolist())
 
         if not lista_colabs:
-            st.warning(f"La empresa '{empresa_activa}' no tiene empleados registrados. Agréguelos en el Módulo 1.")
+            st.warning(f"La empresa '{empresa_activa}' no tiene empleados en el catálogo.")
         else:
             st.markdown("---")
             
@@ -359,13 +364,10 @@ elif menu == "2. Salarios a Ingresar (Planilla)":
             if "Dólares" in moneda:
                 salario_usd = salario_base
                 salario_crc = salario_base * tc_bccr
-                monto_digitado_crc = monto_digitado * tc_bccr
             else:
                 salario_crc = salario_base
                 salario_usd = salario_base / tc_bccr if tc_bccr > 0 else 0.0
-                monto_digitado_crc = monto_digitado
 
-            # Cálculo de CCSS y Prestaciones Laborales en CRC
             ccss_obrero_crc = salario_crc * PORCENTAJE_CCSS_OBRERO
             salario_neto_crc = salario_crc - ccss_obrero_crc
             ccss_patronal_crc = salario_crc * PORCENTAJE_CCSS_PATRONAL
@@ -377,7 +379,7 @@ elif menu == "2. Salarios a Ingresar (Planilla)":
             st.markdown(
                 f"""
                 <div style="background-color:#EBF5FB; padding:15px; border-radius:8px; border-left:5px solid #1F4E79; margin-top:10px;">
-                    <h4 style="margin:0; color:#1F4E79;"><strong>Cálculo Inmediato de Planilla y Prestaciones (Mensual Base):</strong></h4>
+                    <h4 style="margin:0; color:#1F4E79;"><strong>Cálculo Inmediato de Planilla y Prestaciones:</strong></h4>
                     <p style="font-size:15px; margin:5px 0;">
                         <b>• Salario Mensual Bruto:</b> ₡{salario_crc:,.2f} CRC (${salario_usd:,.2f} USD)<br>
                         <b>• CCSS Obrero (10.67%):</b> ₡{ccss_obrero_crc:,.2f} CRC | <b>Salario Neto a Pagar:</b> ₡{salario_neto_crc:,.2f} CRC<br>
@@ -385,10 +387,10 @@ elif menu == "2. Salarios a Ingresar (Planilla)":
                     </p>
                     <hr style="margin:8px 0;">
                     <p style="font-size:15px; margin:0; color:#1B4F72;">
-                        <b>• Provisión Aguinaldo (8.33%):</b> ₡{aguinaldo_crc:,.2f} CRC | 
-                        <b>• Provisión Vacaciones (4.16%):</b> ₡{vacaciones_crc:,.2f} CRC | 
-                        <b>• Provisión Cesantía (5.33%):</b> ₡{cesantia_crc:,.2f} CRC<br>
-                        <b>👉 Total Provisiones Laborales:</b> ₡{total_prestaciones_crc:,.2f} CRC
+                        <b>• Aguinaldo (8.33%):</b> ₡{aguinaldo_crc:,.2f} | 
+                        <b>• Vacaciones (4.16%):</b> ₡{vacaciones_crc:,.2f} | 
+                        <b>• Cesantía (5.33%):</b> ₡{cesantia_crc:,.2f}<br>
+                        <b>👉 Total Provisiones:</b> ₡{total_prestaciones_crc:,.2f} CRC
                     </p>
                 </div>
                 """,
@@ -397,7 +399,7 @@ elif menu == "2. Salarios a Ingresar (Planilla)":
 
             st.markdown("---")
 
-            if st.button("💾 Guardar Registro de Salario"):
+            if st.button("💾 Guardar y Sincronizar Registro"):
                 if monto_digitado <= 0:
                     st.error("El salario digitado debe ser mayor a 0.")
                 else:
@@ -427,21 +429,19 @@ elif menu == "2. Salarios a Ingresar (Planilla)":
             if "confirmar_guardado" in st.session_state and st.session_state["confirmar_guardado"]:
                 data_c = st.session_state["confirmar_guardado"]
                 
-                st.warning("⚠️ **VERIFICACIÓN DE DATOS ANTES DE GUARDAR**")
+                st.warning("⚠️ **VERIFICACIÓN DE DATOS ANTES DE GUARDAR EN LA NUBE**")
                 st.write(f"• **Empresa:** {data_c['Empresa']} | **Empleado:** {data_c['Nombre']} ({data_c['Cedula']})")
                 st.write(f"• **Periodo:** {data_c['Mes']} {data_c['Año']} | **Salario Mensual:** ₡{data_c['Salario_Mensual_CRC']:,.2f} CRC")
-                st.write(f"• **Retención CCSS (10.67%):** ₡{data_c['CCSS_Obrero_CRC']:,.2f} CRC | **Neto:** ₡{data_c['Salario_Neto_CRC']:,.2f} CRC")
-                st.write(f"• **Prestaciones (Aguinaldo + Vac + Cesantía):** ₡{data_c['Total_Prestaciones_CRC']:,.2f} CRC")
 
                 col_conf1, col_conf2 = st.columns(2)
                 with col_conf1:
-                    if st.button("✅ Confirmar y Guardar Información"):
+                    if st.button("✅ Confirmar Guardado en Google Sheets"):
                         nuevo_reg = pd.DataFrame([data_c])
                         df_hist_updated = pd.concat([df_hist, nuevo_reg], ignore_index=True)
-                        guardar_excel(df_hist_updated, ARCHIVO_HISTORICO)
-                        st.session_state["confirmar_guardado"] = None
-                        st.success(f"✅ ¡Registro guardado exitosamente para **{data_c['Nombre']}**!")
-                        st.rerun()
+                        if guardar_datos_gsheet(df_hist_updated, "Datos_Historicos"):
+                            st.session_state["confirmar_guardado"] = None
+                            st.success(f"✅ ¡Registro guardado y sincronizado para **{data_c['Nombre']}**!")
+                            st.rerun()
 
                 with col_conf2:
                     if st.button("❌ Cancelar / Corregir"):
@@ -451,9 +451,9 @@ elif menu == "2. Salarios a Ingresar (Planilla)":
 # --- MÓDULO 3: REPORTE DE PAGO DE CAJA POR EMPRESA ---
 elif menu == "3. Costo CCSS Patronal por Empresa":
     st.title("3. Reporte de Pago a la Caja (CCSS) por Empresa")
-    st.caption("Desglose del monto de la CCSS y cargas patronales en Colones y Dólares.")
+    st.caption("Consulta sincronizada directamente de Google Sheets.")
 
-    df_hist = cargar_excel(ARCHIVO_HISTORICO, COLUMNAS_HISTORICO)
+    df_hist = cargar_datos_gsheet("Datos_Historicos", COLUMNAS_HISTORICO)
     df_hist = asegurar_calculos_historico(df_hist)
 
     if df_hist.empty:
@@ -463,7 +463,6 @@ elif menu == "3. Costo CCSS Patronal por Empresa":
         empresa_sel = st.selectbox("Seleccione la Empresa:", empresas_disponibles)
 
         df_emp = df_hist[df_hist["Empresa"] == empresa_sel].copy()
-
         df_emp["Pago_Total_Caja_CRC"] = df_emp["CCSS_Obrero_CRC"] + df_emp["CCSS_Patronal_CRC"]
         df_emp["Pago_Total_Caja_USD"] = df_emp["Pago_Total_Caja_CRC"] / df_emp["Tipo_Cambio"]
 
@@ -520,13 +519,13 @@ elif menu == "3. Costo CCSS Patronal por Empresa":
 # --- MÓDULO 4: GESTOR DE REGISTROS HISTÓRICOS ---
 elif menu == "4. Gestor de Registros Históricos":
     st.title("4. Modificar o Eliminar Registros Históricos")
-    st.caption("Administre las líneas de salarios registradas por empresa.")
+    st.caption("Administre de forma directa la información en Google Sheets.")
 
-    df_hist = cargar_excel(ARCHIVO_HISTORICO, COLUMNAS_HISTORICO)
+    df_hist = cargar_datos_gsheet("Datos_Historicos", COLUMNAS_HISTORICO)
     df_hist = asegurar_calculos_historico(df_hist)
 
     if df_hist.empty:
-        st.warning("No hay registros en la base de datos histórica.")
+        st.warning("No hay registros en la base de datos.")
     else:
         df_editado = st.data_editor(
             df_hist,
@@ -540,22 +539,22 @@ elif menu == "4. Gestor de Registros Históricos":
             },
         )
 
-        if st.button("💾 Guardar Cambios"):
+        if st.button("💾 Sincronizar Cambios en la Nube"):
             df_editado = asegurar_calculos_historico(df_editado)
-            guardar_excel(df_editado, ARCHIVO_HISTORICO)
-            st.success("✅ Datos históricos actualizados con éxito.")
-            st.rerun()
+            if guardar_datos_gsheet(df_editado, "Datos_Historicos"):
+                st.success("✅ Base de datos histórica sincronizada en la nube.")
+                st.rerun()
 
 # --- MÓDULO 5: REPORTES Y EXPORTACIÓN ---
 elif menu == "5. Reportes y Exportación":
     st.title("5. Reportes Acumulativos y Prestaciones")
-    st.caption("Consolidado por empresa seleccionada en Colones y Dólares.")
+    st.caption("Consolidado bimoneda sincronizado en tiempo real.")
 
-    df_hist = cargar_excel(ARCHIVO_HISTORICO, COLUMNAS_HISTORICO)
+    df_hist = cargar_datos_gsheet("Datos_Historicos", COLUMNAS_HISTORICO)
     df_hist = asegurar_calculos_historico(df_hist)
 
     if df_hist.empty:
-        st.warning("No existen registros guardados en la base de datos histórica.")
+        st.warning("No existen registros guardados en la base de datos.")
     else:
         df_hist["Cedula"] = df_hist["Cedula"].fillna("S/C").astype(str)
         df_hist["Nombre"] = df_hist["Nombre"].fillna("Sin Nombre").astype(str)
