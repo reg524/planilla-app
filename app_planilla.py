@@ -46,12 +46,13 @@ def get_gsheet_connection():
     return st.connection("gsheets", type=GSheetsConnection)
 
 def limpiar_numero_serie(serie):
-    """Convierte columnas con posibles símbolos o comas desde Google Sheets a float limpio"""
+    """Convierte columnas con posibles símbolos, espacios o comas desde Google Sheets a float limpio"""
     return (
         serie.astype(str)
         .str.replace("₡", "", regex=False)
         .str.replace("$", "", regex=False)
         .str.replace(",", "", regex=False)
+        .str.replace(" ", "", regex=False)
         .str.strip()
         .pipe(pd.to_numeric, errors="coerce")
         .fillna(0.0)
@@ -89,13 +90,33 @@ def guardar_datos_gsheet(df, worksheet_name):
         return False
 
 
+def normalizar_mes_nombre(mes_val):
+    """Normaliza variantes de escritura de meses (ej. Septiembre -> Setiembre, números -> nombre)"""
+    m = str(mes_val).strip().capitalize()
+    if m in ["Septiembre", "9", "09"]:
+        return "Setiembre"
+    num_to_mes = {str(v): k for k, v in MESES_MAP.items()}
+    num_to_mes_pad = {f"{v:02d}": k for k, v in MESES_MAP.items()}
+    if m in num_to_mes:
+        return num_to_mes[m]
+    if m in num_to_mes_pad:
+        return num_to_mes_pad[m]
+    return m if m in MESES_MAP else "Enero"
+
+
 def asegurar_calculos_historico(df):
-    """Garantiza que todos los rubros numéricos, CCSS y Prestaciones estén limpios y calculados"""
+    """Garantiza que todos los rubros numéricos, fechas, CCSS y Prestaciones estén limpios y calculados"""
     if df.empty:
         return df
 
     if "Detalle" not in df.columns:
         df["Detalle"] = ""
+
+    # Normalizar Año y Mes para filtros de rango cronológico
+    df["Año_Num"] = pd.to_numeric(df.get("Año", 2026), errors="coerce").fillna(2026).astype(int)
+    df["Mes"] = df.get("Mes", "Enero").apply(normalizar_mes_nombre)
+    df["Mes_Num"] = df["Mes"].map(MESES_MAP).fillna(1).astype(int)
+    df["Periodo_Orden"] = (df["Año_Num"] * 100) + df["Mes_Num"]
 
     df["Salario_Mensual_CRC"] = limpiar_numero_serie(df.get("Salario_Mensual_CRC", pd.Series(0.0, index=df.index)))
     df["Salario_Mensual_USD"] = limpiar_numero_serie(df.get("Salario_Mensual_USD", pd.Series(0.0, index=df.index)))
@@ -103,10 +124,27 @@ def asegurar_calculos_historico(df):
     df["Tipo_Cambio"] = limpiar_numero_serie(df.get("Tipo_Cambio", pd.Series(515.0, index=df.index)))
     df["Tipo_Cambio"] = df["Tipo_Cambio"].apply(lambda x: x if x > 0 else 515.0)
 
+    # Reconstruir Salario_Mensual_CRC si registros antiguos lo traen en 0 pero tienen monto ingresado o en USD
+    mask_crc_cero = df["Salario_Mensual_CRC"] <= 0
+    if mask_crc_cero.any():
+        es_usd = df["Moneda"].astype(str).str.upper().str.contains("USD|DOLAR")
+        df.loc[mask_crc_cero & es_usd & (df["Salario_Mensual_USD"] > 0), "Salario_Mensual_CRC"] = (
+            df["Salario_Mensual_USD"] * df["Tipo_Cambio"]
+        )
+        mask_crc_cero = df["Salario_Mensual_CRC"] <= 0
+        df.loc[mask_crc_cero & es_usd & (df["Salario_Ingresado"] > 0), "Salario_Mensual_CRC"] = (
+            df["Salario_Ingresado"] * df["Tipo_Cambio"]
+        )
+        mask_crc_cero = df["Salario_Mensual_CRC"] <= 0
+        df.loc[mask_crc_cero & (~es_usd) & (df["Salario_Ingresado"] > 0), "Salario_Mensual_CRC"] = (
+            df["Salario_Ingresado"]
+        )
+
     # Recalcular USD si vino en 0 teniendo salario en colones
-    mask_usd_cero = (df["Salario_Mensual_USD"] == 0) & (df["Salario_Mensual_CRC"] > 0)
+    mask_usd_cero = (df["Salario_Mensual_USD"] <= 0) & (df["Salario_Mensual_CRC"] > 0)
     df.loc[mask_usd_cero, "Salario_Mensual_USD"] = df.loc[mask_usd_cero, "Salario_Mensual_CRC"] / df.loc[mask_usd_cero, "Tipo_Cambio"]
 
+    # Recálculo exacto de cargas sociales y prestaciones
     df["CCSS_Obrero_CRC"] = df["Salario_Mensual_CRC"] * PORCENTAJE_CCSS_OBRERO
     df["Salario_Neto_CRC"] = df["Salario_Mensual_CRC"] - df["CCSS_Obrero_CRC"]
     df["CCSS_Patronal_CRC"] = df["Salario_Mensual_CRC"] * PORCENTAJE_CCSS_PATRONAL
@@ -504,7 +542,6 @@ elif menu == "2. Salarios a Ingresar (Planilla)":
                     if st.button("✅ Confirmar Guardado en Google Sheets"):
                         nuevo_reg = pd.DataFrame([data_c])
                         df_hist_updated = pd.concat([df_hist, nuevo_reg], ignore_index=True)
-                        # Asegurar orden exacto de columnas
                         for col in COLUMNAS_HISTORICO:
                             if col not in df_hist_updated.columns:
                                 df_hist_updated[col] = ""
@@ -523,112 +560,136 @@ elif menu == "2. Salarios a Ingresar (Planilla)":
 # --- MÓDULO 3: REPORTE DE PAGO DE CAJA POR EMPRESA ---
 elif menu == "3. Costo CCSS Patronal por Empresa":
     st.title("3. Reporte de Pago a la Caja (CCSS) por Empresa")
-    st.caption("Consulta y recálculo automático sincronizado directamente de Google Sheets.")
+    st.caption("Cálculo automático por rango de fechas mensuales desde los registros históricos.")
 
     df_hist = cargar_datos_gsheet("Datos_Historicos", COLUMNAS_HISTORICO)
     df_hist = asegurar_calculos_historico(df_hist)
 
     if df_hist.empty:
-        st.warning("No hay registros almacenados.")
+        st.warning("No hay registros históricos almacenados en Google Sheets.")
     else:
-        # Normalizar textos clave para evitar pérdida de filas al agrupar
         df_hist["Empresa"] = df_hist["Empresa"].replace("", "Sin Empresa")
         df_hist["Cedula"] = df_hist["Cedula"].replace("", "S/C")
         df_hist["Nombre"] = df_hist["Nombre"].replace("", "Sin Nombre")
         df_hist["Puesto"] = df_hist["Puesto"].replace("", "Sin Puesto")
-        df_hist["Año_Str"] = df_hist["Año"].astype(str).str.replace(".0", "", regex=False)
 
         empresas_disponibles = sorted([e for e in df_hist["Empresa"].unique() if e != "Sin Empresa"])
         
         if not empresas_disponibles:
             st.warning("No se encontraron empresas con salarios registrados.")
         else:
-            col_f_emp, col_f_anio, col_f_mes = st.columns(3)
-            with col_f_emp:
-                empresa_sel = st.selectbox("Seleccione la Empresa:", empresas_disponibles)
-            
+            empresa_sel = st.selectbox("Seleccione la Empresa:", empresas_disponibles)
             df_emp_base = df_hist[df_hist["Empresa"] == empresa_sel].copy()
-            
-            with col_f_anio:
-                anios_disp = ["Todos"] + sorted(df_emp_base["Año_Str"].unique().tolist(), reverse=True)
-                anio_sel = st.selectbox("Filtrar por Año:", anios_disp)
-            with col_f_mes:
-                meses_disp = ["Todos"] + [m for m in MESES if m in df_emp_base["Mes"].unique()]
-                mes_sel = st.selectbox("Filtrar por Mes:", meses_disp)
 
-            df_emp = df_emp_base.copy()
-            if anio_sel != "Todos":
-                df_emp = df_emp[df_emp["Año_Str"] == anio_sel]
-            if mes_sel != "Todos":
-                df_emp = df_emp[df_emp["Mes"] == mes_sel]
+            # Selector de Rango de Fechas Mensuales
+            st.markdown("#### 📅 Rango de Fechas Mensuales a Calcular")
+            anios_disponibles = sorted(df_emp_base["Año_Num"].unique().tolist())
+            if not anios_disponibles:
+                anios_disponibles = [2026]
 
-            if df_emp.empty:
-                st.info("No hay registros de planilla para el filtro de Año/Mes seleccionado.")
+            col_r1, col_r2, col_r3, col_r4 = st.columns(4)
+            with col_r1:
+                mes_inicio = st.selectbox("Desde Mes:", MESES, index=0, key="ccss_mes_ini")
+            with col_r2:
+                anio_inicio = st.selectbox("Desde Año:", anios_disponibles, index=0, key="ccss_anio_ini")
+            with col_r3:
+                mes_fin = st.selectbox("Hasta Mes:", MESES, index=11, key="ccss_mes_fin")
+            with col_r4:
+                anio_fin = st.selectbox("Hasta Año:", anios_disponibles, index=len(anios_disponibles) - 1, key="ccss_anio_fin")
+
+            periodo_ini = (int(anio_inicio) * 100) + MESES_MAP[mes_inicio]
+            periodo_fin = (int(anio_fin) * 100) + MESES_MAP[mes_fin]
+
+            if periodo_ini > periodo_fin:
+                st.error("⚠️ El periodo inicial ('Desde') no puede ser posterior al periodo final ('Hasta').")
             else:
-                df_emp["Pago_Total_Caja_CRC"] = df_emp["CCSS_Obrero_CRC"] + df_emp["CCSS_Patronal_CRC"]
-                df_emp["Pago_Total_Caja_USD"] = df_emp["Pago_Total_Caja_CRC"] / df_emp["Tipo_Cambio"]
+                df_emp = df_emp_base[
+                    (df_emp_base["Periodo_Orden"] >= periodo_ini) &
+                    (df_emp_base["Periodo_Orden"] <= periodo_fin)
+                ].copy()
 
-                df_ccss_resumen = (
-                    df_emp.groupby(["Cedula", "Nombre", "Puesto"], as_index=False)
-                    .agg(
-                        Salario_CRC=("Salario_Mensual_CRC", "sum"),
-                        Salario_USD=("Salario_Mensual_USD", "sum"),
-                        Retencion_Obrero_CRC=("CCSS_Obrero_CRC", "sum"),
-                        Aporte_Patronal_CRC=("CCSS_Patronal_CRC", "sum"),
-                        Pago_Total_Caja_CRC=("Pago_Total_Caja_CRC", "sum"),
-                        Pago_Total_Caja_USD=("Pago_Total_Caja_USD", "sum"),
+                if df_emp.empty:
+                    st.info(f"No hay registros salariales para **{empresa_sel}** entre **{mes_inicio} {anio_inicio}** y **{mes_fin} {anio_fin}**.")
+                else:
+                    df_emp["Pago_Total_Caja_CRC"] = df_emp["CCSS_Obrero_CRC"] + df_emp["CCSS_Patronal_CRC"]
+                    df_emp["Pago_Total_Caja_USD"] = df_emp["Pago_Total_Caja_CRC"] / df_emp["Tipo_Cambio"]
+
+                    df_ccss_resumen = (
+                        df_emp.groupby(["Cedula", "Nombre", "Puesto"], as_index=False)
+                        .agg(
+                            Meses=("Mes", "count"),
+                            Salario_CRC=("Salario_Mensual_CRC", "sum"),
+                            Salario_USD=("Salario_Mensual_USD", "sum"),
+                            Retencion_Obrero_CRC=("CCSS_Obrero_CRC", "sum"),
+                            Aporte_Patronal_CRC=("CCSS_Patronal_CRC", "sum"),
+                            Pago_Total_Caja_CRC=("Pago_Total_Caja_CRC", "sum"),
+                            Pago_Total_Caja_USD=("Pago_Total_Caja_USD", "sum"),
+                        )
                     )
-                )
 
-                # Fila de Totales Generales de la Empresa
-                total_sal_crc = df_ccss_resumen["Salario_CRC"].sum()
-                total_obr_crc = df_ccss_resumen["Retencion_Obrero_CRC"].sum()
-                total_pat_crc = df_ccss_resumen["Aporte_Patronal_CRC"].sum()
-                total_caja_crc = df_ccss_resumen["Pago_Total_Caja_CRC"].sum()
+                    # Métricas de Resumen General del Rango
+                    total_sal_crc = df_ccss_resumen["Salario_CRC"].sum()
+                    total_obr_crc = df_ccss_resumen["Retencion_Obrero_CRC"].sum()
+                    total_pat_crc = df_ccss_resumen["Aporte_Patronal_CRC"].sum()
+                    total_caja_crc = df_ccss_resumen["Pago_Total_Caja_CRC"].sum()
 
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Total Salarios Reportados", f"₡{total_sal_crc:,.2f}")
-                m2.metric("CCSS Obrero (10.67%)", f"₡{total_obr_crc:,.2f}")
-                m3.metric("CCSS Patronal (26.50%)", f"₡{total_pat_crc:,.2f}")
-                m4.metric("Total a Pagar a la Caja", f"₡{total_caja_crc:,.2f}")
+                    st.markdown("---")
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric("Total Salarios del Rango", f"₡{total_sal_crc:,.2f}")
+                    m2.metric("CCSS Obrero (10.67%)", f"₡{total_obr_crc:,.2f}")
+                    m3.metric("CCSS Patronal (26.50%)", f"₡{total_pat_crc:,.2f}")
+                    m4.metric("Total a Pagar a la Caja", f"₡{total_caja_crc:,.2f}")
 
-                st.subheader(f"Desglose de Pago de la CCSS - {empresa_sel}")
-                st.dataframe(
-                    df_ccss_resumen.style.format(
-                        {
-                            "Salario_CRC": "₡{:,.2f}",
-                            "Salario_USD": "${:,.2f}",
-                            "Retencion_Obrero_CRC": "₡{:,.2f}",
-                            "Aporte_Patronal_CRC": "₡{:,.2f}",
-                            "Pago_Total_Caja_CRC": "₡{:,.2f}",
-                            "Pago_Total_Caja_USD": "${:,.2f}",
-                        }
-                    ),
-                    use_container_width=True,
-                )
-
-                st.subheader("✍️ Responsables de Firma para el Reporte")
-                col_f1, col_f2 = st.columns(2)
-                with col_f1:
-                    elaborado_por = st.text_input("Elaborado por:", value="Lic. Roy F. Esquivel González")
-                with col_f2:
-                    revisado_por = st.text_input("Revisado por:", value="Gerencia General")
-
-                if st.button("📄 Generar Reporte de CCSS en PDF"):
-                    subtitulo = f"Reporte de Pago de Caja (CCSS) - Periodo: {mes_sel} / {anio_sel}"
-                    data_pdf = generar_pdf_empresa(
-                        df_ccss_resumen,
-                        empresa_sel,
-                        subtitulo,
-                        elaborado_por,
-                        revisado_por,
+                    st.subheader(f"Desglose de Pago de la CCSS ({mes_inicio} {anio_inicio} - {mes_fin} {anio_fin})")
+                    st.dataframe(
+                        df_ccss_resumen.style.format(
+                            {
+                                "Salario_CRC": "₡{:,.2f}",
+                                "Salario_USD": "${:,.2f}",
+                                "Retencion_Obrero_CRC": "₡{:,.2f}",
+                                "Aporte_Patronal_CRC": "₡{:,.2f}",
+                                "Pago_Total_Caja_CRC": "₡{:,.2f}",
+                                "Pago_Total_Caja_USD": "${:,.2f}",
+                            }
+                        ),
+                        use_container_width=True,
                     )
-                    st.download_button(
-                        label="🔴 Descargar Reporte CCSS (.pdf)",
-                        data=data_pdf,
-                        file_name=f"Reporte_CCSS_{empresa_sel}_{mes_sel}_{anio_sel}.pdf",
-                        mime="application/pdf",
-                    )
+
+                    with st.expander("🔍 Ver detalle mensual incluido en este cálculo"):
+                        cols_detalle_ver = ["Año_Num", "Mes", "Cedula", "Nombre", "Detalle", "Salario_Mensual_CRC", "CCSS_Obrero_CRC", "CCSS_Patronal_CRC"]
+                        st.dataframe(
+                            df_emp[cols_detalle_ver].rename(columns={"Año_Num": "Año"}).style.format(
+                                {
+                                    "Salario_Mensual_CRC": "₡{:,.2f}",
+                                    "CCSS_Obrero_CRC": "₡{:,.2f}",
+                                    "CCSS_Patronal_CRC": "₡{:,.2f}",
+                                }
+                            ),
+                            use_container_width=True,
+                        )
+
+                    st.subheader("✍️ Responsables de Firma para el Reporte")
+                    col_f1, col_f2 = st.columns(2)
+                    with col_f1:
+                        elaborado_por = st.text_input("Elaborado por:", value="Lic. Roy F. Esquivel González")
+                    with col_f2:
+                        revisado_por = st.text_input("Revisado por:", value="Gerencia General")
+
+                    if st.button("📄 Generar Reporte de CCSS en PDF"):
+                        subtitulo = f"Reporte de Pago de Caja (CCSS) | Rango: {mes_inicio} {anio_inicio} a {mes_fin} {anio_fin}"
+                        data_pdf = generar_pdf_empresa(
+                            df_ccss_resumen,
+                            empresa_sel,
+                            subtitulo,
+                            elaborado_por,
+                            revisado_por,
+                        )
+                        st.download_button(
+                            label="🔴 Descargar Reporte CCSS (.pdf)",
+                            data=data_pdf,
+                            file_name=f"Reporte_CCSS_{empresa_sel}_{mes_inicio}{anio_inicio}_a_{mes_fin}{anio_fin}.pdf",
+                            mime="application/pdf",
+                        )
 
 # --- MÓDULO 4: GESTOR DE REGISTROS HISTÓRICOS ---
 elif menu == "4. Gestor de Registros Históricos":
@@ -641,8 +702,9 @@ elif menu == "4. Gestor de Registros Históricos":
     if df_hist.empty:
         st.warning("No hay registros en la base de datos.")
     else:
+        df_mostrar = df_hist[COLUMNAS_HISTORICO].copy()
         df_editado = st.data_editor(
-            df_hist,
+            df_mostrar,
             num_rows="dynamic",
             use_container_width=True,
             column_config={
@@ -658,14 +720,15 @@ elif menu == "4. Gestor de Registros Históricos":
 
         if st.button("💾 Sincronizar Cambios en la Nube"):
             df_editado = asegurar_calculos_historico(df_editado)
-            if guardar_datos_gsheet(df_editado, "Datos_Historicos"):
-                st.success("✅ Base de datos histórica sincronizada en la nube.")
+            df_guardar = df_editado[COLUMNAS_HISTORICO].copy()
+            if guardar_datos_gsheet(df_guardar, "Datos_Historicos"):
+                st.success("✅ Base de datos histórica sincronizada y recalculada en la nube.")
                 st.rerun()
 
 # --- MÓDULO 5: REPORTES Y EXPORTACIÓN ---
 elif menu == "5. Reportes y Exportación":
     st.title("5. Reportes Acumulativos y Prestaciones")
-    st.caption("Consolidado bimoneda sincronizado en tiempo real.")
+    st.caption("Consolidado bimoneda por rango de fechas mensuales.")
 
     df_hist = cargar_datos_gsheet("Datos_Historicos", COLUMNAS_HISTORICO)
     df_hist = asegurar_calculos_historico(df_hist)
@@ -682,88 +745,115 @@ elif menu == "5. Reportes y Exportación":
         empresas_disponibles = sorted([str(e) for e in df_hist["Empresa"].dropna().unique() if str(e).strip() != ""])
         empresa_sel = st.selectbox("Seleccione la Empresa a Consultar:", empresas_disponibles)
 
-        df_emp = df_hist[df_hist["Empresa"] == empresa_sel].copy()
+        df_emp_base = df_hist[df_hist["Empresa"] == empresa_sel].copy()
 
-        if df_emp.empty:
-            st.warning(f"No hay registros salariales acumulados para la empresa '{empresa_sel}'.")
+        # Selector de Rango de Fechas Mensuales
+        st.markdown("#### 📅 Rango de Fechas Mensuales a Consultar")
+        anios_disponibles = sorted(df_emp_base["Año_Num"].unique().tolist())
+        if not anios_disponibles:
+            anios_disponibles = [2026]
+
+        col_r1, col_r2, col_r3, col_r4 = st.columns(4)
+        with col_r1:
+            mes_inicio = st.selectbox("Desde Mes:", MESES, index=0, key="rep_mes_ini")
+        with col_r2:
+            anio_inicio = st.selectbox("Desde Año:", anios_disponibles, index=0, key="rep_anio_ini")
+        with col_r3:
+            mes_fin = st.selectbox("Hasta Mes:", MESES, index=11, key="rep_mes_fin")
+        with col_r4:
+            anio_fin = st.selectbox("Hasta Año:", anios_disponibles, index=len(anios_disponibles) - 1, key="rep_anio_fin")
+
+        periodo_ini = (int(anio_inicio) * 100) + MESES_MAP[mes_inicio]
+        periodo_fin = (int(anio_fin) * 100) + MESES_MAP[mes_fin]
+
+        if periodo_ini > periodo_fin:
+            st.error("⚠️ El periodo inicial ('Desde') no puede ser posterior al periodo final ('Hasta').")
         else:
-            df_emp["Total_Prestaciones_USD"] = df_emp["Total_Prestaciones_CRC"] / df_emp["Tipo_Cambio"]
+            df_emp = df_emp_base[
+                (df_emp_base["Periodo_Orden"] >= periodo_ini) &
+                (df_emp_base["Periodo_Orden"] <= periodo_fin)
+            ].copy()
 
-            df_acum = (
-                df_emp.groupby(
-                    ["Cedula", "Nombre", "Puesto", "Fecha_Ingreso", "Fecha_Salida"], 
-                    as_index=False
-                )
-                .agg(
-                    Meses=("Mes", "count"),
-                    Salario_CRC=("Salario_Mensual_CRC", "sum"),
-                    Salario_USD=("Salario_Mensual_USD", "sum"),
-                    CCSS_CRC=("CCSS_Obrero_CRC", "sum"),
-                    Neto_CRC=("Salario_Neto_CRC", "sum"),
-                    Aguinaldo_CRC=("Aguinaldo_CRC", "sum"),
-                    Vacaciones_CRC=("Vacaciones_CRC", "sum"),
-                    Cesantia_CRC=("Cesantia_CRC", "sum"),
-                    Total_Prest_CRC=("Total_Prestaciones_CRC", "sum"),
-                    Total_Prest_USD=("Total_Prestaciones_USD", "sum"),
-                )
-            )
+            if df_emp.empty:
+                st.warning(f"No hay registros salariales para **{empresa_sel}** entre **{mes_inicio} {anio_inicio}** y **{mes_fin} {anio_fin}**.")
+            else:
+                df_emp["Total_Prestaciones_USD"] = df_emp["Total_Prestaciones_CRC"] / df_emp["Tipo_Cambio"]
 
-            st.subheader(f"Resumen Acumulado de Planilla Bimoneda - {empresa_sel}")
-            st.dataframe(
-                df_acum.style.format(
-                    {
-                        "Salario_CRC": "₡{:,.2f}",
-                        "Salario_USD": "${:,.2f}",
-                        "CCSS_CRC": "₡{:,.2f}",
-                        "Neto_CRC": "₡{:,.2f}",
-                        "Aguinaldo_CRC": "₡{:,.2f}",
-                        "Vacaciones_CRC": "₡{:,.2f}",
-                        "Cesantia_CRC": "₡{:,.2f}",
-                        "Total_Prest_CRC": "₡{:,.2f}",
-                        "Total_Prest_USD": "${:,.2f}",
-                    }
-                ),
-                use_container_width=True,
-            )
-
-            st.subheader("✍️ Responsables de Firma para los Reportes")
-            col_f1, col_f2 = st.columns(2)
-            with col_f1:
-                elaborado_por = st.text_input("Elaborado por:", value="Lic. Roy F. Esquivel González", key="el_rep")
-            with col_f2:
-                revisado_por = st.text_input("Revisado por:", value="Gerencia General", key="rev_rep")
-
-            col_exp1, col_exp2, col_exp3 = st.columns(3)
-
-            with col_exp1:
-                data_excel = generar_excel_empresa(df_acum, empresa_sel, elaborado_por, revisado_por)
-                st.download_button(
-                    label="🟢 Descargar Excel (.xlsx)",
-                    data=data_excel,
-                    file_name=f"Reporte_{empresa_sel}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                df_acum = (
+                    df_emp.groupby(
+                        ["Cedula", "Nombre", "Puesto", "Fecha_Ingreso", "Fecha_Salida"], 
+                        as_index=False
+                    )
+                    .agg(
+                        Meses=("Mes", "count"),
+                        Salario_CRC=("Salario_Mensual_CRC", "sum"),
+                        Salario_USD=("Salario_Mensual_USD", "sum"),
+                        CCSS_CRC=("CCSS_Obrero_CRC", "sum"),
+                        Neto_CRC=("Salario_Neto_CRC", "sum"),
+                        Aguinaldo_CRC=("Aguinaldo_CRC", "sum"),
+                        Vacaciones_CRC=("Vacaciones_CRC", "sum"),
+                        Cesantia_CRC=("Cesantia_CRC", "sum"),
+                        Total_Prest_CRC=("Total_Prestaciones_CRC", "sum"),
+                        Total_Prest_USD=("Total_Prestaciones_USD", "sum"),
+                    )
                 )
 
-            with col_exp2:
-                data_word = generar_word_empresa(df_acum, empresa_sel, elaborado_por, revisado_por)
-                st.download_button(
-                    label="🔵 Descargar Word (.docx)",
-                    data=data_word,
-                    file_name=f"Reporte_{empresa_sel}.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                st.subheader(f"Resumen Acumulado ({mes_inicio} {anio_inicio} - {mes_fin} {anio_fin}) - {empresa_sel}")
+                st.dataframe(
+                    df_acum.style.format(
+                        {
+                            "Salario_CRC": "₡{:,.2f}",
+                            "Salario_USD": "${:,.2f}",
+                            "CCSS_CRC": "₡{:,.2f}",
+                            "Neto_CRC": "₡{:,.2f}",
+                            "Aguinaldo_CRC": "₡{:,.2f}",
+                            "Vacaciones_CRC": "₡{:,.2f}",
+                            "Cesantia_CRC": "₡{:,.2f}",
+                            "Total_Prest_CRC": "₡{:,.2f}",
+                            "Total_Prest_USD": "${:,.2f}",
+                        }
+                    ),
+                    use_container_width=True,
                 )
 
-            with col_exp3:
-                data_pdf = generar_pdf_empresa(
-                    df_acum,
-                    empresa_sel,
-                    "Reporte Acumulado de Planilla, CCSS y Prestaciones Bimoneda",
-                    elaborado_por,
-                    revisado_por,
-                )
-                st.download_button(
-                    label="🔴 Descargar PDF (.pdf)",
-                    data=data_pdf,
-                    file_name=f"Reporte_{empresa_sel}.pdf",
-                    mime="application/pdf",
-                )
+                st.subheader("✍️ Responsables de Firma para los Reportes")
+                col_f1, col_f2 = st.columns(2)
+                with col_f1:
+                    elaborado_por = st.text_input("Elaborado por:", value="Lic. Roy F. Esquivel González", key="el_rep")
+                with col_f2:
+                    revisado_por = st.text_input("Revisado por:", value="Gerencia General", key="rev_rep")
+
+                col_exp1, col_exp2, col_exp3 = st.columns(3)
+
+                with col_exp1:
+                    data_excel = generar_excel_empresa(df_acum, empresa_sel, elaborado_por, revisado_por)
+                    st.download_button(
+                        label="🟢 Descargar Excel (.xlsx)",
+                        data=data_excel,
+                        file_name=f"Reporte_{empresa_sel}_{mes_inicio}{anio_inicio}_a_{mes_fin}{anio_fin}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+
+                with col_exp2:
+                    data_word = generar_word_empresa(df_acum, empresa_sel, elaborado_por, revisado_por)
+                    st.download_button(
+                        label="🔵 Descargar Word (.docx)",
+                        data=data_word,
+                        file_name=f"Reporte_{empresa_sel}_{mes_inicio}{anio_inicio}_a_{mes_fin}{anio_fin}.docx",
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    )
+
+                with col_exp3:
+                    data_pdf = generar_pdf_empresa(
+                        df_acum,
+                        empresa_sel,
+                        f"Reporte Acumulado de Planilla, CCSS y Prestaciones ({mes_inicio} {anio_inicio} - {mes_fin} {anio_fin})",
+                        elaborado_por,
+                        revisado_por,
+                    )
+                    st.download_button(
+                        label="🔴 Descargar PDF (.pdf)",
+                        data=data_pdf,
+                        file_name=f"Reporte_{empresa_sel}_{mes_inicio}{anio_inicio}_a_{mes_fin}{anio_fin}.pdf",
+                        mime="application/pdf",
+                    )
