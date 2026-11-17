@@ -48,26 +48,28 @@ def get_gsheet_connection():
 def cargar_datos_gsheet(worksheet_name, columnas_defecto):
     try:
         conn = get_gsheet_connection()
-        df = conn.read(worksheet=worksheet_name, ttl=5)
+        # ttl=0 obliga a leer siempre la versión más reciente sin usar memoria caché vieja
+        df = conn.read(worksheet=worksheet_name, ttl=0)
+        df = df.dropna(how="all")
         for col in columnas_defecto:
             if col not in df.columns:
                 df[col] = 0.0 if "CRC" in col or "USD" in col else ""
         
-        # Forzar conversión a texto en campos descriptivos
         for col in ["Empresa", "Cedula", "Cedula_Juridica", "Nombre", "Puesto", "Contacto", "Fecha_Ingreso", "Fecha_Salida"]:
             if col in df.columns:
-                df[col] = df[col].astype(str).replace(["nan", "None", "<NA>"], "")
-        return df
+                df[col] = df[col].astype(str).replace(["nan", "None", "<NA>", "NaN"], "")
+        return df.reset_index(drop=True)
     except Exception:
         return pd.DataFrame(columns=columnas_defecto)
 
 def guardar_datos_gsheet(df, worksheet_name):
     try:
         conn = get_gsheet_connection()
-        for col in df.columns:
-            if df[col].dtype == object:
-                df[col] = df[col].astype(str).fillna("")
-        conn.update(worksheet=worksheet_name, data=df)
+        df_clean = df.copy().dropna(how="all")
+        for col in df_clean.columns:
+            if df_clean[col].dtype == object:
+                df_clean[col] = df_clean[col].astype(str).replace(["nan", "None", "<NA>", "NaN"], "").fillna("")
+        conn.update(worksheet=worksheet_name, data=df_clean)
         st.cache_data.clear()
         return True
     except Exception as e:
@@ -257,7 +259,7 @@ menu = st.sidebar.radio(
 # --- MÓDULO 1: CATÁLOGO DE EMPRESAS Y EMPLEADOS ---
 if menu == "1. Catálogo de Empresas y Empleados":
     st.title("1. Administración de Empresas y Colaboradores")
-    st.caption("Los datos guardados aquí se sincronizan inmediatamente en Google Sheets.")
+    st.caption("Presione Enter o haga clic fuera de la celda antes de presionar 'Sincronizar'.")
 
     df_emp = cargar_datos_gsheet("Empresas", ["Empresa", "Cedula_Juridica", "Contacto"])
     df_empld = cargar_datos_gsheet("Empleados", ["Empresa", "Cedula", "Nombre", "Puesto", "Fecha_Ingreso", "Fecha_Salida"])
@@ -272,29 +274,32 @@ if menu == "1. Catálogo de Empresas y Empleados":
             use_container_width=True,
             key="editor_empresas",
             column_config={
-                "Empresa": st.column_config.TextColumn("Nombre de la Empresa", required=True),
+                "Empresa": st.column_config.TextColumn("Nombre de la Empresa"),
                 "Cedula_Juridica": st.column_config.TextColumn("Cédula Jurídica / Dimex"),
                 "Contacto": st.column_config.TextColumn("Contacto / Observaciones"),
             }
         )
         if st.button("💾 Sincronizar Catálogo de Empresas"):
-            if guardar_datos_gsheet(df_emp_edited, "Empresas"):
-                st.success("✅ Catálogo de Empresas actualizado y sincronizado.")
+            df_emp_clean = df_emp_edited[df_emp_edited["Empresa"].astype(str).str.strip() != ""]
+            if guardar_datos_gsheet(df_emp_clean, "Empresas"):
+                st.success(f"✅ Catálogo sincronizado ({len(df_emp_clean)} empresas guardadas).")
                 st.rerun()
 
     with tab2:
         st.subheader("Base de Datos de Empleados (Nube)")
-        empresas_list = sorted([str(e) for e in df_emp_edited["Empresa"].dropna().unique() if str(e).strip() != ""])
+        empresas_list = sorted([str(e) for e in df_emp["Empresa"].dropna().unique() if str(e).strip() != ""])
         
         if not empresas_list:
             st.warning("Primero registre al menos una empresa en el catálogo de la pestaña anterior.")
         else:
             emp_sel_padron = st.selectbox("Seleccione la Empresa:", empresas_list)
-            df_sub_empld = df_empld[df_empld["Empresa"] == emp_sel_padron].copy()
+            df_sub_empld = df_empld[df_empld["Empresa"] == emp_sel_padron].copy().reset_index(drop=True)
             
-            # Quitar la columna Empresa para evitar redundancia y error de deshabilitar campos
-            if "Empresa" in df_sub_empld.columns:
-                df_sub_empld = df_sub_empld.drop(columns=["Empresa"])
+            columnas_padron = ["Cedula", "Nombre", "Puesto", "Fecha_Ingreso", "Fecha_Salida"]
+            for c in columnas_padron:
+                if c not in df_sub_empld.columns:
+                    df_sub_empld[c] = ""
+            df_sub_empld = df_sub_empld[columnas_padron]
 
             df_sub_edited = st.data_editor(
                 df_sub_empld,
@@ -302,8 +307,8 @@ if menu == "1. Catálogo de Empresas y Empleados":
                 use_container_width=True,
                 key=f"editor_empld_{emp_sel_padron}",
                 column_config={
-                    "Cedula": st.column_config.TextColumn("Cédula Colaborador", required=True),
-                    "Nombre": st.column_config.TextColumn("Nombre Completo", required=True),
+                    "Cedula": st.column_config.TextColumn("Cédula Colaborador"),
+                    "Nombre": st.column_config.TextColumn("Nombre Completo"),
                     "Puesto": st.column_config.TextColumn("Puesto / Cargo"),
                     "Fecha_Ingreso": st.column_config.TextColumn("Fecha Ingreso (DD/MM/AAAA)"),
                     "Fecha_Salida": st.column_config.TextColumn("Fecha Salida / Activo"),
@@ -311,11 +316,21 @@ if menu == "1. Catálogo de Empresas y Empleados":
             )
 
             if st.button(f"💾 Sincronizar Padrón de {emp_sel_padron}"):
-                df_otros = df_empld[df_empld["Empresa"] != emp_sel_padron]
-                df_sub_edited["Empresa"] = emp_sel_padron
-                df_final_empld = pd.concat([df_otros, df_sub_edited], ignore_index=True)
+                # Filtrar filas donde se haya ingresado al menos el Nombre o la Cédula
+                df_sub_clean = df_sub_edited[
+                    (df_sub_edited["Nombre"].astype(str).str.strip() != "") |
+                    (df_sub_edited["Cedula"].astype(str).str.strip() != "")
+                ].copy()
+                
+                df_otros = df_empld[df_empld["Empresa"] != emp_sel_padron].copy()
+                df_sub_clean["Empresa"] = emp_sel_padron
+                
+                # Reordenar columnas exactas
+                cols_finales = ["Empresa", "Cedula", "Nombre", "Puesto", "Fecha_Ingreso", "Fecha_Salida"]
+                df_final_empld = pd.concat([df_otros, df_sub_clean], ignore_index=True)[cols_finales]
+                
                 if guardar_datos_gsheet(df_final_empld, "Empleados"):
-                    st.success(f"✅ Personal de **{emp_sel_padron}** sincronizado en la nube.")
+                    st.success(f"✅ Personal de **{emp_sel_padron}** sincronizado ({len(df_sub_clean)} colaboradores guardados).")
                     st.rerun()
 
 # --- MÓDULO 2: SALARIOS A INGRESAR (PLANILLA) ---
