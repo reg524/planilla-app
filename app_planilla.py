@@ -20,11 +20,11 @@ st.set_page_config(
 )
 
 # Porcentajes según normativa de Costa Rica
-PORCENTAJE_CCSS_OBRERO = 0.1067   # 10.67% CCSS Trabajador
+PORCENTAJE_CCSS_OBRERO = 0.1067    # 10.67% CCSS Trabajador
 PORCENTAJE_CCSS_PATRONAL = 0.2650  # 26.50% Cargas Sociales Patronales
-PORCENTAJE_AGUINALDO = 1 / 12       # 8.33% Aguinaldo
-PORCENTAJE_VACACIONES = 1 / 24      # 4.16% Vacaciones
-PORCENTAJE_CESANTIA = 0.0533        # 5.33% Cesantía
+PORCENTAJE_AGUINALDO = 1 / 12      # 8.33% Aguinaldo
+PORCENTAJE_VACACIONES = 1 / 24     # 4.16% Vacaciones
+PORCENTAJE_CESANTIA = 0.0533       # 5.33% Cesantía
 
 MESES_MAP = {
     "Enero": 1, "Febrero": 2, "Marzo": 3, "Abril": 4, "Mayo": 5, "Junio": 6,
@@ -34,7 +34,7 @@ MESES = list(MESES_MAP.keys())
 
 COLUMNAS_HISTORICO = [
     "Empresa", "Año", "Mes", "Cedula", "Nombre", "Puesto", "Fecha_Ingreso", "Fecha_Salida",
-    "Moneda", "Tipo_Cambio", "Salario_Ingresado", "Salario_Mensual_CRC", "Salario_Mensual_USD",
+    "Detalle", "Moneda", "Tipo_Cambio", "Salario_Ingresado", "Salario_Mensual_CRC", "Salario_Mensual_USD",
     "CCSS_Obrero_CRC", "Salario_Neto_CRC", "CCSS_Patronal_CRC",
     "Aguinaldo_CRC", "Vacaciones_CRC", "Cesantia_CRC", "Total_Prestaciones_CRC"
 ]
@@ -45,19 +45,31 @@ COLUMNAS_HISTORICO = [
 def get_gsheet_connection():
     return st.connection("gsheets", type=GSheetsConnection)
 
+def limpiar_numero_serie(serie):
+    """Convierte columnas con posibles símbolos o comas desde Google Sheets a float limpio"""
+    return (
+        serie.astype(str)
+        .str.replace("₡", "", regex=False)
+        .str.replace("$", "", regex=False)
+        .str.replace(",", "", regex=False)
+        .str.strip()
+        .pipe(pd.to_numeric, errors="coerce")
+        .fillna(0.0)
+    )
+
 def cargar_datos_gsheet(worksheet_name, columnas_defecto):
     try:
         conn = get_gsheet_connection()
-        # ttl=0 obliga a leer siempre la versión más reciente sin usar memoria caché vieja
         df = conn.read(worksheet=worksheet_name, ttl=0)
         df = df.dropna(how="all")
         for col in columnas_defecto:
             if col not in df.columns:
-                df[col] = 0.0 if "CRC" in col or "USD" in col else ""
+                df[col] = 0.0 if ("CRC" in col or "USD" in col or col in ["Tipo_Cambio", "Salario_Ingresado"]) else ""
         
-        for col in ["Empresa", "Cedula", "Cedula_Juridica", "Nombre", "Puesto", "Contacto", "Fecha_Ingreso", "Fecha_Salida"]:
+        cols_texto = ["Empresa", "Cedula", "Cedula_Juridica", "Nombre", "Puesto", "Contacto", "Fecha_Ingreso", "Fecha_Salida", "Detalle", "Mes", "Moneda"]
+        for col in cols_texto:
             if col in df.columns:
-                df[col] = df[col].astype(str).replace(["nan", "None", "<NA>", "NaN"], "")
+                df[col] = df[col].astype(str).replace(["nan", "None", "<NA>", "NaN"], "").str.strip()
         return df.reset_index(drop=True)
     except Exception:
         return pd.DataFrame(columns=columnas_defecto)
@@ -78,16 +90,22 @@ def guardar_datos_gsheet(df, worksheet_name):
 
 
 def asegurar_calculos_historico(df):
-    """Garantiza que todos los rubros de CCSS y Prestaciones existan y estén calculados"""
+    """Garantiza que todos los rubros numéricos, CCSS y Prestaciones estén limpios y calculados"""
     if df.empty:
         return df
 
-    if "Salario_Mensual_CRC" not in df.columns:
-        df["Salario_Mensual_CRC"] = 0.0
+    if "Detalle" not in df.columns:
+        df["Detalle"] = ""
 
-    df["Salario_Mensual_CRC"] = pd.to_numeric(df["Salario_Mensual_CRC"], errors="coerce").fillna(0.0)
-    df["Tipo_Cambio"] = pd.to_numeric(df["Tipo_Cambio"], errors="coerce").fillna(515.0)
+    df["Salario_Mensual_CRC"] = limpiar_numero_serie(df.get("Salario_Mensual_CRC", pd.Series(0.0, index=df.index)))
+    df["Salario_Mensual_USD"] = limpiar_numero_serie(df.get("Salario_Mensual_USD", pd.Series(0.0, index=df.index)))
+    df["Salario_Ingresado"] = limpiar_numero_serie(df.get("Salario_Ingresado", pd.Series(0.0, index=df.index)))
+    df["Tipo_Cambio"] = limpiar_numero_serie(df.get("Tipo_Cambio", pd.Series(515.0, index=df.index)))
     df["Tipo_Cambio"] = df["Tipo_Cambio"].apply(lambda x: x if x > 0 else 515.0)
+
+    # Recalcular USD si vino en 0 teniendo salario en colones
+    mask_usd_cero = (df["Salario_Mensual_USD"] == 0) & (df["Salario_Mensual_CRC"] > 0)
+    df.loc[mask_usd_cero, "Salario_Mensual_USD"] = df.loc[mask_usd_cero, "Salario_Mensual_CRC"] / df.loc[mask_usd_cero, "Tipo_Cambio"]
 
     df["CCSS_Obrero_CRC"] = df["Salario_Mensual_CRC"] * PORCENTAJE_CCSS_OBRERO
     df["Salario_Neto_CRC"] = df["Salario_Mensual_CRC"] - df["CCSS_Obrero_CRC"]
@@ -316,7 +334,6 @@ if menu == "1. Catálogo de Empresas y Empleados":
             )
 
             if st.button(f"💾 Sincronizar Padrón de {emp_sel_padron}"):
-                # Filtrar filas donde se haya ingresado al menos el Nombre o la Cédula
                 df_sub_clean = df_sub_edited[
                     (df_sub_edited["Nombre"].astype(str).str.strip() != "") |
                     (df_sub_edited["Cedula"].astype(str).str.strip() != "")
@@ -325,7 +342,6 @@ if menu == "1. Catálogo de Empresas y Empleados":
                 df_otros = df_empld[df_empld["Empresa"] != emp_sel_padron].copy()
                 df_sub_clean["Empresa"] = emp_sel_padron
                 
-                # Reordenar columnas exactas
                 cols_finales = ["Empresa", "Cedula", "Nombre", "Puesto", "Fecha_Ingreso", "Fecha_Salida"]
                 df_final_empld = pd.concat([df_otros, df_sub_clean], ignore_index=True)[cols_finales]
                 
@@ -380,9 +396,16 @@ elif menu == "2. Salarios a Ingresar (Planilla)":
             with col_p4:
                 modo = st.selectbox("Periodicidad:", ["Mensual", "Quincenal", "Semanal"])
 
-            fecha_consulta = datetime.date(int(anio), MESES_MAP[mes], 1)
-            tc_bccr_auto = obtener_tipo_cambio_compra_bccr(fecha_consulta)
-            tc_bccr = st.number_input(f"T.C. COMPRA BCCR ({mes} {anio}):", min_value=1.0, value=float(tc_bccr_auto), step=0.5, format="%.2f")
+            col_tc, col_det = st.columns([1, 2])
+            with col_tc:
+                fecha_consulta = datetime.date(int(anio), MESES_MAP[mes], 1)
+                tc_bccr_auto = obtener_tipo_cambio_compra_bccr(fecha_consulta)
+                tc_bccr = st.number_input(f"T.C. COMPRA BCCR ({mes} {anio}):", min_value=1.0, value=float(tc_bccr_auto), step=0.5, format="%.2f")
+            with col_det:
+                detalle_ingreso = st.text_input(
+                    "Detalle / Concepto del Pago:",
+                    placeholder="Ej: Salario ordinario, Horas extra, Bonificación, Liquidación..."
+                )
 
             st.subheader("4. Monto Ganado (Salario)")
             simbolo = "₡" if "Colones" in moneda else "$"
@@ -453,6 +476,7 @@ elif menu == "2. Salarios a Ingresar (Planilla)":
                         "Puesto": datos_colab.get("Puesto", ""),
                         "Fecha_Ingreso": datos_colab.get("Fecha_Ingreso", ""),
                         "Fecha_Salida": datos_colab.get("Fecha_Salida", "Activo"),
+                        "Detalle": detalle_ingreso.strip() if detalle_ingreso.strip() else "Salario Ordinario",
                         "Moneda": "USD" if "Dólares" in moneda else "CRC",
                         "Tipo_Cambio": tc_bccr,
                         "Salario_Ingresado": monto_digitado,
@@ -472,13 +496,20 @@ elif menu == "2. Salarios a Ingresar (Planilla)":
                 
                 st.warning("⚠️ **VERIFICACIÓN DE DATOS ANTES DE GUARDAR EN LA NUBE**")
                 st.write(f"• **Empresa:** {data_c['Empresa']} | **Empleado:** {data_c['Nombre']} ({data_c['Cedula']})")
-                st.write(f"• **Periodo:** {data_c['Mes']} {data_c['Año']} | **Salario Mensual:** ₡{data_c['Salario_Mensual_CRC']:,.2f} CRC")
+                st.write(f"• **Periodo:** {data_c['Mes']} {data_c['Año']} | **Detalle:** {data_c['Detalle']}")
+                st.write(f"• **Salario Mensual:** ₡{data_c['Salario_Mensual_CRC']:,.2f} CRC")
 
                 col_conf1, col_conf2 = st.columns(2)
                 with col_conf1:
                     if st.button("✅ Confirmar Guardado en Google Sheets"):
                         nuevo_reg = pd.DataFrame([data_c])
                         df_hist_updated = pd.concat([df_hist, nuevo_reg], ignore_index=True)
+                        # Asegurar orden exacto de columnas
+                        for col in COLUMNAS_HISTORICO:
+                            if col not in df_hist_updated.columns:
+                                df_hist_updated[col] = ""
+                        df_hist_updated = df_hist_updated[COLUMNAS_HISTORICO]
+
                         if guardar_datos_gsheet(df_hist_updated, "Datos_Historicos"):
                             st.session_state["confirmar_guardado"] = None
                             st.success(f"✅ ¡Registro guardado y sincronizado para **{data_c['Nombre']}**!")
@@ -492,7 +523,7 @@ elif menu == "2. Salarios a Ingresar (Planilla)":
 # --- MÓDULO 3: REPORTE DE PAGO DE CAJA POR EMPRESA ---
 elif menu == "3. Costo CCSS Patronal por Empresa":
     st.title("3. Reporte de Pago a la Caja (CCSS) por Empresa")
-    st.caption("Consulta sincronizada directamente de Google Sheets.")
+    st.caption("Consulta y recálculo automático sincronizado directamente de Google Sheets.")
 
     df_hist = cargar_datos_gsheet("Datos_Historicos", COLUMNAS_HISTORICO)
     df_hist = asegurar_calculos_historico(df_hist)
@@ -500,62 +531,104 @@ elif menu == "3. Costo CCSS Patronal por Empresa":
     if df_hist.empty:
         st.warning("No hay registros almacenados.")
     else:
-        empresas_disponibles = sorted([str(e) for e in df_hist["Empresa"].dropna().unique() if str(e).strip() != ""])
-        empresa_sel = st.selectbox("Seleccione la Empresa:", empresas_disponibles)
+        # Normalizar textos clave para evitar pérdida de filas al agrupar
+        df_hist["Empresa"] = df_hist["Empresa"].replace("", "Sin Empresa")
+        df_hist["Cedula"] = df_hist["Cedula"].replace("", "S/C")
+        df_hist["Nombre"] = df_hist["Nombre"].replace("", "Sin Nombre")
+        df_hist["Puesto"] = df_hist["Puesto"].replace("", "Sin Puesto")
+        df_hist["Año_Str"] = df_hist["Año"].astype(str).str.replace(".0", "", regex=False)
 
-        df_emp = df_hist[df_hist["Empresa"] == empresa_sel].copy()
-        df_emp["Pago_Total_Caja_CRC"] = df_emp["CCSS_Obrero_CRC"] + df_emp["CCSS_Patronal_CRC"]
-        df_emp["Pago_Total_Caja_USD"] = df_emp["Pago_Total_Caja_CRC"] / df_emp["Tipo_Cambio"]
+        empresas_disponibles = sorted([e for e in df_hist["Empresa"].unique() if e != "Sin Empresa"])
+        
+        if not empresas_disponibles:
+            st.warning("No se encontraron empresas con salarios registrados.")
+        else:
+            col_f_emp, col_f_anio, col_f_mes = st.columns(3)
+            with col_f_emp:
+                empresa_sel = st.selectbox("Seleccione la Empresa:", empresas_disponibles)
+            
+            df_emp_base = df_hist[df_hist["Empresa"] == empresa_sel].copy()
+            
+            with col_f_anio:
+                anios_disp = ["Todos"] + sorted(df_emp_base["Año_Str"].unique().tolist(), reverse=True)
+                anio_sel = st.selectbox("Filtrar por Año:", anios_disp)
+            with col_f_mes:
+                meses_disp = ["Todos"] + [m for m in MESES if m in df_emp_base["Mes"].unique()]
+                mes_sel = st.selectbox("Filtrar por Mes:", meses_disp)
 
-        df_ccss_resumen = (
-            df_emp.groupby(["Cedula", "Nombre", "Puesto"])
-            .agg(
-                Salario_CRC=("Salario_Mensual_CRC", "sum"),
-                Salario_USD=("Salario_Mensual_USD", "sum"),
-                Retencion_Obrero_CRC=("CCSS_Obrero_CRC", "sum"),
-                Aporte_Patronal_CRC=("CCSS_Patronal_CRC", "sum"),
-                Pago_Total_Caja_CRC=("Pago_Total_Caja_CRC", "sum"),
-                Pago_Total_Caja_USD=("Pago_Total_Caja_USD", "sum"),
-            )
-            .reset_index()
-        )
+            df_emp = df_emp_base.copy()
+            if anio_sel != "Todos":
+                df_emp = df_emp[df_emp["Año_Str"] == anio_sel]
+            if mes_sel != "Todos":
+                df_emp = df_emp[df_emp["Mes"] == mes_sel]
 
-        st.subheader(f"Desglose de Pago de la CCSS - {empresa_sel}")
-        st.dataframe(
-            df_ccss_resumen.style.format(
-                {
-                    "Salario_CRC": "₡{:,.2f}",
-                    "Salario_USD": "${:,.2f}",
-                    "Retencion_Obrero_CRC": "₡{:,.2f}",
-                    "Aporte_Patronal_CRC": "₡{:,.2f}",
-                    "Pago_Total_Caja_CRC": "₡{:,.2f}",
-                    "Pago_Total_Caja_USD": "${:,.2f}",
-                }
-            ),
-            use_container_width=True,
-        )
+            if df_emp.empty:
+                st.info("No hay registros de planilla para el filtro de Año/Mes seleccionado.")
+            else:
+                df_emp["Pago_Total_Caja_CRC"] = df_emp["CCSS_Obrero_CRC"] + df_emp["CCSS_Patronal_CRC"]
+                df_emp["Pago_Total_Caja_USD"] = df_emp["Pago_Total_Caja_CRC"] / df_emp["Tipo_Cambio"]
 
-        st.subheader("✍️ Responsables de Firma para el Reporte")
-        col_f1, col_f2 = st.columns(2)
-        with col_f1:
-            elaborado_por = st.text_input("Elaborado por:", value="Lic. Roy F. Esquivel González")
-        with col_f2:
-            revisado_por = st.text_input("Revisado por:", value="Gerencia General")
+                df_ccss_resumen = (
+                    df_emp.groupby(["Cedula", "Nombre", "Puesto"], as_index=False)
+                    .agg(
+                        Salario_CRC=("Salario_Mensual_CRC", "sum"),
+                        Salario_USD=("Salario_Mensual_USD", "sum"),
+                        Retencion_Obrero_CRC=("CCSS_Obrero_CRC", "sum"),
+                        Aporte_Patronal_CRC=("CCSS_Patronal_CRC", "sum"),
+                        Pago_Total_Caja_CRC=("Pago_Total_Caja_CRC", "sum"),
+                        Pago_Total_Caja_USD=("Pago_Total_Caja_USD", "sum"),
+                    )
+                )
 
-        if st.button("📄 Generar Reporte de CCSS en PDF"):
-            data_pdf = generar_pdf_empresa(
-                df_ccss_resumen,
-                empresa_sel,
-                "Reporte de Pago de Caja (CCSS) y Costos Patronales Bimoneda",
-                elaborado_por,
-                revisado_por,
-            )
-            st.download_button(
-                label="🔴 Descargar Reporte CCSS (.pdf)",
-                data=data_pdf,
-                file_name=f"Reporte_CCSS_{empresa_sel}.pdf",
-                mime="application/pdf",
-            )
+                # Fila de Totales Generales de la Empresa
+                total_sal_crc = df_ccss_resumen["Salario_CRC"].sum()
+                total_obr_crc = df_ccss_resumen["Retencion_Obrero_CRC"].sum()
+                total_pat_crc = df_ccss_resumen["Aporte_Patronal_CRC"].sum()
+                total_caja_crc = df_ccss_resumen["Pago_Total_Caja_CRC"].sum()
+
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("Total Salarios Reportados", f"₡{total_sal_crc:,.2f}")
+                m2.metric("CCSS Obrero (10.67%)", f"₡{total_obr_crc:,.2f}")
+                m3.metric("CCSS Patronal (26.50%)", f"₡{total_pat_crc:,.2f}")
+                m4.metric("Total a Pagar a la Caja", f"₡{total_caja_crc:,.2f}")
+
+                st.subheader(f"Desglose de Pago de la CCSS - {empresa_sel}")
+                st.dataframe(
+                    df_ccss_resumen.style.format(
+                        {
+                            "Salario_CRC": "₡{:,.2f}",
+                            "Salario_USD": "${:,.2f}",
+                            "Retencion_Obrero_CRC": "₡{:,.2f}",
+                            "Aporte_Patronal_CRC": "₡{:,.2f}",
+                            "Pago_Total_Caja_CRC": "₡{:,.2f}",
+                            "Pago_Total_Caja_USD": "${:,.2f}",
+                        }
+                    ),
+                    use_container_width=True,
+                )
+
+                st.subheader("✍️ Responsables de Firma para el Reporte")
+                col_f1, col_f2 = st.columns(2)
+                with col_f1:
+                    elaborado_por = st.text_input("Elaborado por:", value="Lic. Roy F. Esquivel González")
+                with col_f2:
+                    revisado_por = st.text_input("Revisado por:", value="Gerencia General")
+
+                if st.button("📄 Generar Reporte de CCSS en PDF"):
+                    subtitulo = f"Reporte de Pago de Caja (CCSS) - Periodo: {mes_sel} / {anio_sel}"
+                    data_pdf = generar_pdf_empresa(
+                        df_ccss_resumen,
+                        empresa_sel,
+                        subtitulo,
+                        elaborado_por,
+                        revisado_por,
+                    )
+                    st.download_button(
+                        label="🔴 Descargar Reporte CCSS (.pdf)",
+                        data=data_pdf,
+                        file_name=f"Reporte_CCSS_{empresa_sel}_{mes_sel}_{anio_sel}.pdf",
+                        mime="application/pdf",
+                    )
 
 # --- MÓDULO 4: GESTOR DE REGISTROS HISTÓRICOS ---
 elif menu == "4. Gestor de Registros Históricos":
@@ -575,6 +648,7 @@ elif menu == "4. Gestor de Registros Históricos":
             column_config={
                 "Empresa": st.column_config.TextColumn("Empresa"),
                 "Nombre": st.column_config.TextColumn("Nombre"),
+                "Detalle": st.column_config.TextColumn("Detalle"),
                 "Mes": st.column_config.SelectboxColumn("Mes", options=MESES),
                 "Moneda": st.column_config.SelectboxColumn("Moneda", options=["CRC", "USD"]),
                 "Salario_Mensual_CRC": st.column_config.NumberColumn("Salario Mensual CRC", format="₡%.2f"),
@@ -599,11 +673,11 @@ elif menu == "5. Reportes y Exportación":
     if df_hist.empty:
         st.warning("No existen registros guardados en la base de datos.")
     else:
-        df_hist["Cedula"] = df_hist["Cedula"].fillna("S/C").astype(str)
-        df_hist["Nombre"] = df_hist["Nombre"].fillna("Sin Nombre").astype(str)
-        df_hist["Puesto"] = df_hist["Puesto"].fillna("Sin Puesto").astype(str)
-        df_hist["Fecha_Ingreso"] = df_hist["Fecha_Ingreso"].fillna("N/A").astype(str)
-        df_hist["Fecha_Salida"] = df_hist["Fecha_Salida"].fillna("Activo").astype(str)
+        df_hist["Cedula"] = df_hist["Cedula"].replace("", "S/C")
+        df_hist["Nombre"] = df_hist["Nombre"].replace("", "Sin Nombre")
+        df_hist["Puesto"] = df_hist["Puesto"].replace("", "Sin Puesto")
+        df_hist["Fecha_Ingreso"] = df_hist["Fecha_Ingreso"].replace("", "N/A")
+        df_hist["Fecha_Salida"] = df_hist["Fecha_Salida"].replace("", "Activo")
 
         empresas_disponibles = sorted([str(e) for e in df_hist["Empresa"].dropna().unique() if str(e).strip() != ""])
         empresa_sel = st.selectbox("Seleccione la Empresa a Consultar:", empresas_disponibles)
@@ -618,7 +692,7 @@ elif menu == "5. Reportes y Exportación":
             df_acum = (
                 df_emp.groupby(
                     ["Cedula", "Nombre", "Puesto", "Fecha_Ingreso", "Fecha_Salida"], 
-                    dropna=False
+                    as_index=False
                 )
                 .agg(
                     Meses=("Mes", "count"),
@@ -632,7 +706,6 @@ elif menu == "5. Reportes y Exportación":
                     Total_Prest_CRC=("Total_Prestaciones_CRC", "sum"),
                     Total_Prest_USD=("Total_Prestaciones_USD", "sum"),
                 )
-                .reset_index()
             )
 
             st.subheader(f"Resumen Acumulado de Planilla Bimoneda - {empresa_sel}")
