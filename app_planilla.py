@@ -1,5 +1,6 @@
 import datetime
 import io
+import time
 import xml.etree.ElementTree as ET
 import pandas as pd
 import requests
@@ -39,7 +40,7 @@ COLUMNAS_HISTORICO = [
     "Aguinaldo_CRC", "Vacaciones_CRC", "Cesantia_CRC", "Total_Prestaciones_CRC"
 ]
 
-# --- CONEXIÓN DIRECTA A GOOGLE SHEETS EN LA NUBE ---
+# --- CONEXIÓN DIRECTA A GOOGLE SHEETS CON RESPALDO EN SESIÓN ---
 
 @st.cache_resource
 def get_gsheet_connection():
@@ -59,21 +60,35 @@ def limpiar_numero_serie(serie):
     )
 
 def cargar_datos_gsheet(worksheet_name, columnas_defecto):
-    try:
-        conn = get_gsheet_connection()
-        df = conn.read(worksheet=worksheet_name, ttl=0)
-        df = df.dropna(how="all")
-        for col in columnas_defecto:
-            if col not in df.columns:
-                df[col] = 0.0 if ("CRC" in col or "USD" in col or col in ["Tipo_Cambio", "Salario_Ingresado"]) else ""
+    cache_key = f"backup_df_{worksheet_name}"
+    conn = get_gsheet_connection()
+    
+    # Intentar lectura hasta 2 veces si hay micro-corte de red
+    for intento in range(2):
+        try:
+            df = conn.read(worksheet=worksheet_name, ttl=60)
+            df = df.dropna(how="all")
+            for col in columnas_defecto:
+                if col not in df.columns:
+                    df[col] = 0.0 if ("CRC" in col or "USD" in col or col in ["Tipo_Cambio", "Salario_Ingresado"]) else ""
+            
+            cols_texto = ["Empresa", "Cedula", "Cedula_Juridica", "Nombre", "Puesto", "Contacto", "Fecha_Ingreso", "Fecha_Salida", "Detalle", "Mes", "Moneda"]
+            for col in cols_texto:
+                if col in df.columns:
+                    df[col] = df[col].astype(str).replace(["nan", "None", "<NA>", "NaN"], "").str.strip()
+            
+            df = df.reset_index(drop=True)
+            # Guardar respaldo válido en memoria de sesión
+            st.session_state[cache_key] = df.copy()
+            return df
+        except Exception:
+            time.sleep(0.5)
+    
+    # Si Google Sheets tarda en responder, usar respaldo en memoria en vez de vaciar la pantalla
+    if cache_key in st.session_state and not st.session_state[cache_key].empty:
+        return st.session_state[cache_key].copy()
         
-        cols_texto = ["Empresa", "Cedula", "Cedula_Juridica", "Nombre", "Puesto", "Contacto", "Fecha_Ingreso", "Fecha_Salida", "Detalle", "Mes", "Moneda"]
-        for col in cols_texto:
-            if col in df.columns:
-                df[col] = df[col].astype(str).replace(["nan", "None", "<NA>", "NaN"], "").str.strip()
-        return df.reset_index(drop=True)
-    except Exception:
-        return pd.DataFrame(columns=columnas_defecto)
+    return pd.DataFrame(columns=columnas_defecto)
 
 def guardar_datos_gsheet(df, worksheet_name):
     try:
@@ -83,6 +98,9 @@ def guardar_datos_gsheet(df, worksheet_name):
             if df_clean[col].dtype == object:
                 df_clean[col] = df_clean[col].astype(str).replace(["nan", "None", "<NA>", "NaN"], "").fillna("")
         conn.update(worksheet=worksheet_name, data=df_clean)
+        
+        # Actualizar respaldo local inmediato y limpiar caché de lectura
+        st.session_state[f"backup_df_{worksheet_name}"] = df_clean.reset_index(drop=True).copy()
         st.cache_data.clear()
         return True
     except Exception as e:
@@ -91,7 +109,7 @@ def guardar_datos_gsheet(df, worksheet_name):
 
 
 def normalizar_mes_nombre(mes_val):
-    """Normaliza variantes de escritura de meses (ej. Septiembre -> Setiembre, números -> nombre)"""
+    """Normaliza variantes de escritura de meses"""
     m = str(mes_val).strip().capitalize()
     if m in ["Septiembre", "9", "09"]:
         return "Setiembre"
@@ -112,7 +130,6 @@ def asegurar_calculos_historico(df):
     if "Detalle" not in df.columns:
         df["Detalle"] = ""
 
-    # Normalizar Año y Mes para filtros de rango cronológico
     df["Año_Num"] = pd.to_numeric(df.get("Año", 2026), errors="coerce").fillna(2026).astype(int)
     df["Mes"] = df.get("Mes", "Enero").apply(normalizar_mes_nombre)
     df["Mes_Num"] = df["Mes"].map(MESES_MAP).fillna(1).astype(int)
@@ -124,7 +141,6 @@ def asegurar_calculos_historico(df):
     df["Tipo_Cambio"] = limpiar_numero_serie(df.get("Tipo_Cambio", pd.Series(515.0, index=df.index)))
     df["Tipo_Cambio"] = df["Tipo_Cambio"].apply(lambda x: x if x > 0 else 515.0)
 
-    # Reconstruir Salario_Mensual_CRC si registros antiguos lo traen en 0 pero tienen monto ingresado o en USD
     mask_crc_cero = df["Salario_Mensual_CRC"] <= 0
     if mask_crc_cero.any():
         es_usd = df["Moneda"].astype(str).str.upper().str.contains("USD|DOLAR")
@@ -140,11 +156,9 @@ def asegurar_calculos_historico(df):
             df["Salario_Ingresado"]
         )
 
-    # Recalcular USD si vino en 0 teniendo salario en colones
     mask_usd_cero = (df["Salario_Mensual_USD"] <= 0) & (df["Salario_Mensual_CRC"] > 0)
     df.loc[mask_usd_cero, "Salario_Mensual_USD"] = df.loc[mask_usd_cero, "Salario_Mensual_CRC"] / df.loc[mask_usd_cero, "Tipo_Cambio"]
 
-    # Recálculo exacto de cargas sociales y prestaciones
     df["CCSS_Obrero_CRC"] = df["Salario_Mensual_CRC"] * PORCENTAJE_CCSS_OBRERO
     df["Salario_Neto_CRC"] = df["Salario_Mensual_CRC"] - df["CCSS_Obrero_CRC"]
     df["CCSS_Patronal_CRC"] = df["Salario_Mensual_CRC"] * PORCENTAJE_CCSS_PATRONAL
@@ -156,8 +170,9 @@ def asegurar_calculos_historico(df):
     return df
 
 
+@st.cache_data(ttl=3600)
 def obtener_tipo_cambio_compra_bccr(fecha_dt):
-    """Consulta del Tipo de Cambio de COMPRA BCCR (Indicador 317)"""
+    """Consulta del Tipo de Cambio de COMPRA BCCR (Indicador 317) con caché por fecha"""
     fecha_str = fecha_dt.strftime("%d/%m/%Y")
     url = "https://gee.bccr.fi.cr/Indicadores/Suscripciones/WS/wsindicadoreseconomicos.asmx/ObtenerIndicadoresEconomicosXML"
 
@@ -301,6 +316,10 @@ def generar_pdf_empresa(df_emp, nombre_empresa, titulo_reporte, elaborado_por, r
 # --- BARRA LATERAL ---
 st.sidebar.title("Módulos del Sistema (Sincronizado)")
 
+if st.sidebar.button("🔄 Actualizar Datos de la Nube", use_container_width=True):
+    st.cache_data.clear()
+    st.rerun()
+
 menu = st.sidebar.radio(
     "Seleccione el Menú:",
     [
@@ -394,16 +413,18 @@ elif menu == "2. Salarios a Ingresar (Planilla)":
 
     df_emp = cargar_datos_gsheet("Empresas", ["Empresa", "Cedula_Juridica", "Contacto"])
     df_empld = cargar_datos_gsheet("Empleados", ["Empresa", "Cedula", "Nombre", "Puesto", "Fecha_Ingreso", "Fecha_Salida"])
-    df_hist = cargar_datos_gsheet("Datos_Historicos", COLUMNAS_HISTORICO)
 
     empresas_list = sorted([str(e) for e in df_emp["Empresa"].dropna().unique() if str(e).strip() != ""])
 
     if not empresas_list:
-        st.warning("⚠️ No hay empresas registradas en Google Sheets. Vaya al Módulo 1 para agregarlas.")
+        st.warning("⚠️ No se detectaron empresas cargadas desde Google Sheets.")
+        if st.button("🔄 Reintentar conexión con Google Sheets"):
+            st.cache_data.clear()
+            st.rerun()
     else:
         col_emp1, col_emp2 = st.columns(2)
         with col_emp1:
-            empresa_activa = st.selectbox("Seleccione la Empresa:", empresas_list)
+            empresa_activa = st.selectbox("Seleccione la Empresa:", empresas_list, key="sel_emp_mod2")
 
         df_colabs = df_empld[df_empld["Empresa"] == empresa_activa]
         lista_colabs = sorted([str(n) for n in df_colabs["Nombre"].dropna().unique() if str(n).strip() != ""])
@@ -415,7 +436,7 @@ elif menu == "2. Salarios a Ingresar (Planilla)":
             
             col_s1, col_s2, col_s3 = st.columns(3)
             with col_s1:
-                colaborador_sel = st.selectbox("Seleccione el Colaborador:", lista_colabs)
+                colaborador_sel = st.selectbox("Seleccione el Colaborador:", lista_colabs, key="sel_colab_mod2")
             
             datos_colab = df_colabs[df_colabs["Nombre"] == colaborador_sel].iloc[-1].to_dict()
             
@@ -540,6 +561,7 @@ elif menu == "2. Salarios a Ingresar (Planilla)":
                 col_conf1, col_conf2 = st.columns(2)
                 with col_conf1:
                     if st.button("✅ Confirmar Guardado en Google Sheets"):
+                        df_hist = cargar_datos_gsheet("Datos_Historicos", COLUMNAS_HISTORICO)
                         nuevo_reg = pd.DataFrame([data_c])
                         df_hist_updated = pd.concat([df_hist, nuevo_reg], ignore_index=True)
                         for col in COLUMNAS_HISTORICO:
@@ -581,7 +603,6 @@ elif menu == "3. Costo CCSS Patronal por Empresa":
             empresa_sel = st.selectbox("Seleccione la Empresa:", empresas_disponibles)
             df_emp_base = df_hist[df_hist["Empresa"] == empresa_sel].copy()
 
-            # Selector de Rango de Fechas Mensuales
             st.markdown("#### 📅 Rango de Fechas Mensuales a Calcular")
             anios_disponibles = sorted(df_emp_base["Año_Num"].unique().tolist())
             if not anios_disponibles:
@@ -627,7 +648,6 @@ elif menu == "3. Costo CCSS Patronal por Empresa":
                         )
                     )
 
-                    # Métricas de Resumen General del Rango
                     total_sal_crc = df_ccss_resumen["Salario_CRC"].sum()
                     total_obr_crc = df_ccss_resumen["Retencion_Obrero_CRC"].sum()
                     total_pat_crc = df_ccss_resumen["Aporte_Patronal_CRC"].sum()
@@ -747,7 +767,6 @@ elif menu == "5. Reportes y Exportación":
 
         df_emp_base = df_hist[df_hist["Empresa"] == empresa_sel].copy()
 
-        # Selector de Rango de Fechas Mensuales
         st.markdown("#### 📅 Rango de Fechas Mensuales a Consultar")
         anios_disponibles = sorted(df_emp_base["Año_Num"].unique().tolist())
         if not anios_disponibles:
