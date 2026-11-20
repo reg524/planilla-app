@@ -668,58 +668,65 @@ elif menu == "6. Respaldo y Restauración (Backup)":
     st.title("6. Respaldo y Restauración de Base de Datos (Backup)")
     st.caption("Genere copias de seguridad completas del proyecto o restaure un respaldo previo en Google Sheets.")
 
-    tab_bkp1, tab_bkp2 = st.tabs(["📥 Generar y Descargar Respaldo (Backup)", "📤 Restaurar Respaldo en el Proyecto"])
+    st.subheader("1️⃣ Generar y Descargar Respaldo (Backup)")
+    st.write(
+        "Este respaldo crea un archivo Excel maestro (`.xlsx`) con las tres bases de datos completas del sistema: "
+        "**Empresas**, **Empleados** y **Datos_Historicos**."
+    )
 
-    with tab_bkp1:
-        st.subheader("Copia de Seguridad Completa del Sistema")
-        st.write(
-            "Este respaldo descarga un único archivo Excel (`.xlsx`) que contiene de forma íntegra las tres bases de datos del proyecto: "
-            "**Empresas**, **Empleados** y **Datos_Historicos**."
-        )
+    try:
+        df_emp_stat = cargar_datos_gsheet("Empresas", COLUMNAS_EMPRESAS)
+        df_empld_stat = cargar_datos_gsheet("Empleados", COLUMNAS_EMPLEADOS)
+        df_hist_stat = cargar_datos_gsheet("Datos_Historicos", COLUMNAS_HISTORICO)
+
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Empresas a respaldar", len(df_emp_stat))
+        c2.metric("Empleados a respaldar", len(df_empld_stat))
+        c3.metric("Registros Históricos a respaldar", len(df_hist_stat))
 
         fecha_hoy_str = datetime.datetime.now().strftime("%Y%m%d_%H%M")
         nombre_bkp = f"Backup_Planilla_Completo_{fecha_hoy_str}.xlsx"
+        bytes_backup = generar_backup_completo_excel()
 
-        try:
-            bytes_backup = generar_backup_completo_excel()
-            ruta_bkp_local = guardar_copia_local_opcional(bytes_backup, nombre_bkp)
-            if ruta_bkp_local:
-                st.info(f"💾 Copia de seguridad guardada también en tu equipo: `{ruta_bkp_local}`")
+        ruta_bkp_local = guardar_copia_local_opcional(bytes_backup, nombre_bkp)
+        if ruta_bkp_local:
+            st.success(f"💾 Copia de seguridad guardada automáticamente en tu equipo: `{ruta_bkp_local}`")
 
-            st.download_button(
-                label="📦 Descargar Respaldo Completo (.xlsx)",
-                data=bytes_backup,
-                file_name=nombre_bkp,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-                key="btn_descargar_backup"
-            )
-        except Exception as e:
-            st.error(f"No se pudo generar el respaldo: {e}")
+        st.download_button(
+            label="📦 Descargar Archivo de Respaldo (.xlsx)",
+            data=bytes_backup,
+            file_name=nombre_bkp,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key="btn_descargar_backup_directo"
+        )
+    except Exception as e:
+        st.error(f"Error técnico al preparar el respaldo: {e}")
 
-    with tab_bkp2:
-        st.subheader("Restaurar Respaldo en el Mismo Proyecto")
-        st.error(
-            "⚠️ **ADVERTENCIA CRÍTICA:** Al subir y restaurar un archivo de respaldo, **ESTO BORRARÁ Y SOBRESCRIBIRÁ TODOS LOS ARCHIVOS Y REGISTROS ELABORADOS ANTES DEL BACKUP** en Google Sheets (Empresas, Empleados y Datos Históricos)."
+    st.markdown("---")
+
+    st.subheader("2️⃣ Restaurar Respaldo Automáticamente en el Proyecto")
+    st.error(
+        "⚠️ **ADVERTENCIA CRÍTICA:** Al subir y restaurar un archivo de respaldo, **ESTO BORRARÁ Y SOBRESCRIBIRÁ TODOS LOS ARCHIVOS Y REGISTROS ELABORADOS ANTES DEL BACKUP** en Google Sheets (Empresas, Empleados y Datos Históricos)."
+    )
+
+    archivo_bkp = st.file_uploader(
+        "Seleccione el archivo de respaldo (.xlsx) generado previamente por este sistema:",
+        type=["xlsx"],
+        key="uploader_backup"
+    )
+
+    if archivo_bkp is not None:
+        confirmar_borrado = st.checkbox(
+            "Confirmo que entiendo que esta acción borrará los archivos y registros elaborados antes del backup.",
+            key="chk_confirmar_backup"
         )
 
-        archivo_bkp = st.file_uploader(
-            "Seleccione el archivo de respaldo (.xlsx) generado previamente por este sistema:",
-            type=["xlsx"],
-            key="uploader_backup"
-        )
-
-        if archivo_bkp is not None:
-            confirmar_borrado = st.checkbox(
-                "Entiendo y acepto que esta acción borrará los datos actuales elaborados antes del backup y los reemplazará con el archivo seleccionado.",
-                key="chk_confirmar_backup"
-            )
-
-            if st.button("🔄 Restaurar Respaldo Automáticamente en el Proyecto", disabled=not confirmar_borrado, type="primary"):
-                with st.spinner("Restaurando bases de datos en Google Sheets..."):
-                    exito, mensaje = restaurar_backup_completo_excel(archivo_bkp)
-                    if exito:
-                        st.success(f"✅ {mensaje}")
-                        st.balloons()
-                    else:
-                        st.error(f"❌ {mensaje}")
+        if st.button("🔄 Restaurar Respaldo en el Proyecto", disabled=not confirmar_borrado, type="primary"):
+            with st.spinner("Restaurando bases de datos en Google Sheets..."):
+                exito, mensaje = restaurar_backup_completo_excel(archivo_bkp)
+                if exito:
+                    st.success(f"✅ {mensaje}")
+                    st.balloons()
+                else:
+                    st.error(f"❌ {mensaje}")
