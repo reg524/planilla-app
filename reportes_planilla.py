@@ -1,3 +1,4 @@
+import datetime
 import html
 import io
 import os
@@ -36,7 +37,7 @@ MESES = list(MESES_MAP.keys())
 COLUMNAS_EMPRESAS = ["Empresa", "Cedula_Juridica", "Contacto"]
 COLUMNAS_EMPLEADOS = ["Empresa", "Cedula", "Nombre", "Puesto", "Fecha_Ingreso", "Fecha_Salida"]
 COLUMNAS_HISTORICO = [
-    "Empresa", "Año", "Mes", "Cedula", "Nombre", "Puesto", "Fecha_Ingreso", "Fecha_Salida",
+    "Empresa", "Fecha_Registro", "Año", "Mes", "Cedula", "Nombre", "Puesto", "Fecha_Ingreso", "Fecha_Salida",
     "Detalle", "Moneda", "Tipo_Cambio", "Salario_Ingresado", "Salario_Mensual_CRC", "Salario_Mensual_USD",
     "CCSS_Obrero_CRC", "Salario_Neto_CRC", "CCSS_Patronal_CRC",
     "Aguinaldo_CRC", "Vacaciones_CRC", "Cesantia_CRC", "Total_Prestaciones_CRC"
@@ -82,7 +83,10 @@ def cargar_datos_gsheet(worksheet_name, columnas_defecto):
                 if col not in df.columns:
                     df[col] = 0.0 if ("CRC" in col or "USD" in col or col in ["Tipo_Cambio", "Salario_Ingresado"]) else ""
             
-            cols_texto = ["Empresa", "Cedula", "Cedula_Juridica", "Nombre", "Puesto", "Contacto", "Fecha_Ingreso", "Fecha_Salida", "Detalle", "Mes", "Moneda"]
+            cols_texto = [
+                "Empresa", "Fecha_Registro", "Cedula", "Cedula_Juridica", "Nombre",
+                "Puesto", "Contacto", "Fecha_Ingreso", "Fecha_Salida", "Detalle", "Mes", "Moneda"
+            ]
             for col in cols_texto:
                 if col in df.columns:
                     df[col] = df[col].astype(str).replace(["nan", "None", "<NA>", "NaN"], "").str.strip()
@@ -129,12 +133,32 @@ def normalizar_mes_nombre(mes_val):
     return m if m in MESES_MAP else "Enero"
 
 
+def _parsear_fecha_fila(row):
+    """Extrae fecha exacta desde Fecha_Registro (DD/MM/AAAA) o reconstruye desde Año/Mes si es registro antiguo"""
+    val_f = str(row.get("Fecha_Registro", "")).strip()
+    if val_f and val_f not in ["nan", "None", "<NA>", ""]:
+        for fmt in ("%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y", "%Y/%m/%d"):
+            try:
+                return datetime.datetime.strptime(val_f[:10], fmt).date()
+            except ValueError:
+                continue
+    try:
+        anio = int(float(str(row.get("Año", 2026)).strip()))
+    except Exception:
+        anio = 2026
+    mes_nom = normalizar_mes_nombre(row.get("Mes", "Enero"))
+    mes_num = MESES_MAP.get(mes_nom, 1)
+    return datetime.date(anio, mes_num, 1)
+
+
 def asegurar_calculos_historico(df):
     if df.empty:
         return df
 
     if "Detalle" not in df.columns:
         df["Detalle"] = ""
+    if "Fecha_Registro" not in df.columns:
+        df["Fecha_Registro"] = ""
 
     anio_limpio = df.get("Año", "2026").astype(str).str.replace(".0", "", regex=False).str.strip()
     df["Año_Num"] = pd.to_numeric(anio_limpio, errors="coerce").fillna(2026).astype(int)
@@ -142,6 +166,16 @@ def asegurar_calculos_historico(df):
 
     df["Mes"] = df.get("Mes", "Enero").apply(normalizar_mes_nombre)
     df["Mes_Num"] = df["Mes"].map(MESES_MAP).fillna(1).astype(int)
+
+    # Normalización de Fecha Exacta (Día/Mes/Año) para filtros y visualización
+    fechas_dt = df.apply(_parsear_fecha_fila, axis=1)
+    df["Fecha_DT"] = fechas_dt
+    df["Fecha_Registro"] = fechas_dt.apply(lambda d: d.strftime("%d/%m/%Y"))
+    df["Año_Num"] = fechas_dt.apply(lambda d: d.year)
+    df["Año"] = df["Año_Num"]
+    df["Mes_Num"] = fechas_dt.apply(lambda d: d.month)
+    inv_meses = {v: k for k, v in MESES_MAP.items()}
+    df["Mes"] = df["Mes_Num"].map(inv_meses)
     df["Periodo_Orden"] = (df["Año_Num"] * 100) + df["Mes_Num"]
 
     df["Salario_Mensual_CRC"] = limpiar_numero_serie(df.get("Salario_Mensual_CRC", pd.Series(0.0, index=df.index)))
@@ -370,10 +404,10 @@ def generar_word_empresa(df_emp, nombre_empresa, titulo_reporte, elaborado_por, 
             p.paragraph_format.space_before = Pt(0)
             p.paragraph_format.space_after = Pt(0)
 
-            if isinstance(val, (float, int)) and not isinstance(val, bool) and str(col_name) not in ["Meses", "Año"]:
+            if isinstance(val, (float, int)) and not isinstance(val, bool) and str(col_name) not in ["Meses", "Año", "Registros"]:
                 texto = f"${val:,.2f}" if "USD" in str(col_name) else f"₡{val:,.2f}"
                 p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
-            elif str(col_name) in ["Meses", "Año", "Cedula", "Fecha_Ingreso", "Fecha_Salida"]:
+            elif str(col_name) in ["Meses", "Año", "Registros", "Cedula", "Fecha_Registro", "Fecha_Ingreso", "Fecha_Salida"]:
                 texto = str(val) if pd.notnull(val) else ""
                 p.alignment = WD_ALIGN_PARAGRAPH.CENTER
             else:
@@ -442,7 +476,7 @@ def generar_pdf_empresa(df_emp, nombre_empresa, titulo_reporte, elaborado_por, r
     for _, row in df_emp.iterrows():
         fila_formateada = []
         for col_name, val in zip(df_emp.columns, row):
-            if isinstance(val, (float, int)) and not isinstance(val, bool) and str(col_name) not in ["Meses", "Año"]:
+            if isinstance(val, (float, int)) and not isinstance(val, bool) and str(col_name) not in ["Meses", "Año", "Registros"]:
                 texto = f"${val:,.2f}" if "USD" in str(col_name) else f"₡{val:,.2f}"
             else:
                 texto = escapar_xml(val)
