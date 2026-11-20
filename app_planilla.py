@@ -31,6 +31,9 @@ st.set_page_config(
     layout="wide",
 )
 
+INV_MESES_MAP = {v: k for k, v in MESES_MAP.items()}
+
+
 def limpiar_columnas_agrupacion(df, mapeo_defecto):
     """Garantiza que no existan valores None/NaN en columnas de agrupación de Pandas"""
     df_out = df.copy()
@@ -46,6 +49,7 @@ def limpiar_columnas_agrupacion(df, mapeo_defecto):
                 .replace(["", "None", "nan", "NaN", "<NA>", "null"], valor_defecto)
             )
     return df_out
+
 
 # --- BARRA LATERAL ---
 st.sidebar.title("Módulos del Sistema (Sincronizado)")
@@ -147,7 +151,7 @@ if menu == "1. Catálogo de Empresas y Empleados":
 # --- MÓDULO 2: SALARIOS A INGRESAR (PLANILLA) ---
 elif menu == "2. Salarios a Ingresar (Planilla)":
     st.title("2. Salarios a Ingresar")
-    st.caption("Alimentación de salarios con sincronización remota instantánea.")
+    st.caption("Alimentación de salarios con fecha exacta (Día / Mes / Año) y sincronización remota instantánea.")
 
     df_emp = cargar_datos_gsheet("Empresas", COLUMNAS_EMPRESAS)
     df_empld = cargar_datos_gsheet("Empleados", COLUMNAS_EMPLEADOS)
@@ -183,21 +187,35 @@ elif menu == "2. Salarios a Ingresar (Planilla)":
             with col_s3:
                 st.text_input("Puesto que Desempeña:", value=str(datos_colab.get("Puesto", "")), disabled=True)
 
-            col_p1, col_p2, col_p3, col_p4 = st.columns(4)
+            col_p1, col_p2, col_p3 = st.columns(3)
             with col_p1:
-                anio = st.number_input("Año:", min_value=2015, max_value=2035, value=2026)
+                fecha_planilla = st.date_input(
+                    "Fecha de Planilla / Pago (Día / Mes / Año):",
+                    value=datetime.date.today(),
+                    min_value=datetime.date(2015, 1, 1),
+                    max_value=datetime.date(2035, 12, 31),
+                    format="DD/MM/YYYY",
+                    key="fecha_ingreso_planilla"
+                )
             with col_p2:
-                mes = st.selectbox("Mes:", MESES)
-            with col_p3:
                 moneda = st.selectbox("Moneda:", ["₡ (Colones)", "$ (Dólares)"])
-            with col_p4:
+            with col_p3:
                 modo = st.selectbox("Periodicidad:", ["Mensual", "Quincenal", "Semanal"])
+
+            anio = int(fecha_planilla.year)
+            mes = INV_MESES_MAP[fecha_planilla.month]
+            fecha_reg_str = fecha_planilla.strftime("%d/%m/%Y")
 
             col_tc, col_det = st.columns([1, 2])
             with col_tc:
-                fecha_consulta = datetime.date(int(anio), MESES_MAP[mes], 1)
-                tc_bccr_auto = obtener_tipo_cambio_compra_bccr(fecha_consulta)
-                tc_bccr = st.number_input(f"T.C. COMPRA BCCR ({mes} {anio}):", min_value=1.0, value=float(tc_bccr_auto), step=0.5, format="%.2f")
+                tc_bccr_auto = obtener_tipo_cambio_compra_bccr(fecha_planilla)
+                tc_bccr = st.number_input(
+                    f"T.C. COMPRA BCCR ({fecha_reg_str}):",
+                    min_value=1.0,
+                    value=float(tc_bccr_auto),
+                    step=0.5,
+                    format="%.2f"
+                )
             with col_det:
                 detalle_ingreso = st.text_input(
                     "Detalle / Concepto del Pago:",
@@ -239,7 +257,7 @@ elif menu == "2. Salarios a Ingresar (Planilla)":
             st.markdown(
                 f"""
                 <div style="background-color:#EBF5FB; padding:15px; border-radius:8px; border-left:5px solid #1F4E79; margin-top:10px;">
-                    <h4 style="margin:0; color:#1F4E79;"><strong>Cálculo Inmediato de Planilla y Prestaciones:</strong></h4>
+                    <h4 style="margin:0; color:#1F4E79;"><strong>Cálculo Inmediato de Planilla ({fecha_reg_str}):</strong></h4>
                     <p style="font-size:15px; margin:5px 0;">
                         <b>• Salario Mensual Bruto:</b> ₡{salario_crc:,.2f} CRC (${salario_usd:,.2f} USD)<br>
                         <b>• CCSS Obrero (10.67%):</b> ₡{ccss_obrero_crc:,.2f} CRC | <b>Salario Neto a Pagar:</b> ₡{salario_neto_crc:,.2f} CRC<br>
@@ -265,7 +283,8 @@ elif menu == "2. Salarios a Ingresar (Planilla)":
                 else:
                     st.session_state["confirmar_guardado"] = {
                         "Empresa": empresa_activa,
-                        "Año": int(anio),
+                        "Fecha_Registro": fecha_reg_str,
+                        "Año": anio,
                         "Mes": mes,
                         "Cedula": datos_colab.get("Cedula", ""),
                         "Nombre": colaborador_sel,
@@ -292,7 +311,7 @@ elif menu == "2. Salarios a Ingresar (Planilla)":
                 
                 st.warning("⚠️ **VERIFICACIÓN DE DATOS ANTES DE GUARDAR EN LA NUBE**")
                 st.write(f"• **Empresa:** {data_c['Empresa']} | **Empleado:** {data_c['Nombre']} ({data_c['Cedula']})")
-                st.write(f"• **Periodo:** {data_c['Mes']} {data_c['Año']} | **Detalle:** {data_c['Detalle']}")
+                st.write(f"• **Fecha Exacta:** {data_c['Fecha_Registro']} ({data_c['Mes']} {data_c['Año']}) | **Detalle:** {data_c['Detalle']}")
                 st.write(f"• **Salario Mensual:** ₡{data_c['Salario_Mensual_CRC']:,.2f} CRC")
 
                 col_conf1, col_conf2 = st.columns(2)
@@ -308,7 +327,7 @@ elif menu == "2. Salarios a Ingresar (Planilla)":
 
                         if guardar_datos_gsheet(df_hist_updated, "Datos_Historicos"):
                             st.session_state["confirmar_guardado"] = None
-                            st.success(f"✅ ¡Registro guardado y sincronizado para **{data_c['Nombre']}**!")
+                            st.success(f"✅ ¡Registro guardado y sincronizado para **{data_c['Nombre']}** ({data_c['Fecha_Registro']})!")
                             st.rerun()
 
                 with col_conf2:
@@ -319,7 +338,7 @@ elif menu == "2. Salarios a Ingresar (Planilla)":
 # --- MÓDULO 3: REPORTE DE PAGO DE CAJA POR EMPRESA ---
 elif menu == "3. Costo CCSS Patronal por Empresa":
     st.title("3. Reporte de Pago a la Caja (CCSS) por Empresa")
-    st.caption("Cálculo automático por rango de fechas mensuales desde los registros históricos.")
+    st.caption("Cálculo automático por rango exacto de fechas (Día / Mes / Año) desde los registros históricos.")
 
     df_hist = cargar_datos_gsheet("Datos_Historicos", COLUMNAS_HISTORICO)
     df_hist = asegurar_calculos_historico(df_hist)
@@ -345,31 +364,41 @@ elif menu == "3. Costo CCSS Patronal por Empresa":
             empresa_sel = st.selectbox("Seleccione la Empresa:", empresas_disponibles, key="ccss_emp_sel")
             df_emp_base = df_hist[df_hist["Empresa"].str.lower() == empresa_sel.lower()].copy()
 
-            st.markdown("#### 📅 Rango de Fechas Mensuales a Calcular (Puede digitar años anteriores)")
-            col_r1, col_r2, col_r3, col_r4 = st.columns(4)
+            st.markdown("#### 📅 Rango de Fechas Exactas a Calcular (Día / Mes / Año)")
+            col_r1, col_r2 = st.columns(2)
             with col_r1:
-                mes_inicio = st.selectbox("Desde Mes:", MESES, index=0, key="ccss_mes_ini")
+                fecha_inicio = st.date_input(
+                    "Desde Fecha (Día / Mes / Año):",
+                    value=datetime.date(2024, 1, 1),
+                    min_value=datetime.date(2015, 1, 1),
+                    max_value=datetime.date(2035, 12, 31),
+                    format="DD/MM/YYYY",
+                    key="ccss_fecha_ini"
+                )
             with col_r2:
-                anio_inicio = st.number_input("Desde Año:", min_value=2015, max_value=2035, value=2024, step=1, key="ccss_anio_ini")
-            with col_r3:
-                mes_fin = st.selectbox("Hasta Mes:", MESES, index=11, key="ccss_mes_fin")
-            with col_r4:
-                anio_fin = st.number_input("Hasta Año:", min_value=2015, max_value=2035, value=2026, step=1, key="ccss_anio_fin")
+                fecha_fin = st.date_input(
+                    "Hasta Fecha (Día / Mes / Año):",
+                    value=datetime.date(2026, 12, 31),
+                    min_value=datetime.date(2015, 1, 1),
+                    max_value=datetime.date(2035, 12, 31),
+                    format="DD/MM/YYYY",
+                    key="ccss_fecha_fin"
+                )
 
-            periodo_ini = (int(anio_inicio) * 100) + MESES_MAP[mes_inicio]
-            periodo_fin = (int(anio_fin) * 100) + MESES_MAP[mes_fin]
-
-            if periodo_ini > periodo_fin:
-                st.error("⚠️ El periodo inicial ('Desde') no puede ser posterior al periodo final ('Hasta').")
+            if fecha_inicio > fecha_fin:
+                st.error("⚠️ La fecha inicial ('Desde') no puede ser posterior a la fecha final ('Hasta').")
             else:
                 df_emp = df_emp_base[
-                    (df_emp_base["Periodo_Orden"] >= periodo_ini) &
-                    (df_emp_base["Periodo_Orden"] <= periodo_fin)
+                    (df_emp_base["Fecha_DT"] >= fecha_inicio) &
+                    (df_emp_base["Fecha_DT"] <= fecha_fin)
                 ].copy()
+
+                f_ini_str = fecha_inicio.strftime("%d/%m/%Y")
+                f_fin_str = fecha_fin.strftime("%d/%m/%Y")
 
                 if df_emp.empty:
                     anios_ex = sorted(df_emp_base["Año_Num"].unique().tolist())
-                    st.info(f"No hay registros para **{empresa_sel}** en el rango seleccionado. Años con datos disponibles para esta empresa: **{anios_ex}**")
+                    st.info(f"No hay registros para **{empresa_sel}** entre **{f_ini_str}** y **{f_fin_str}**. Años con datos disponibles: **{anios_ex}**")
                 else:
                     df_emp["Pago_Total_Caja_CRC"] = df_emp["CCSS_Obrero_CRC"] + df_emp["CCSS_Patronal_CRC"]
                     df_emp["Pago_Total_Caja_USD"] = df_emp["Pago_Total_Caja_CRC"] / df_emp["Tipo_Cambio"]
@@ -377,7 +406,7 @@ elif menu == "3. Costo CCSS Patronal por Empresa":
                     df_ccss_resumen = (
                         df_emp.groupby(["Cedula", "Nombre", "Puesto"], as_index=False, dropna=False)
                         .agg(
-                            Meses=("Mes", "count"),
+                            Registros=("Fecha_Registro", "count"),
                             Salario_CRC=("Salario_Mensual_CRC", "sum"),
                             Salario_USD=("Salario_Mensual_USD", "sum"),
                             Retencion_Obrero_CRC=("CCSS_Obrero_CRC", "sum"),
@@ -399,7 +428,7 @@ elif menu == "3. Costo CCSS Patronal por Empresa":
                     m3.metric("CCSS Patronal (26.50%)", f"₡{total_pat_crc:,.2f}")
                     m4.metric("Total a Pagar a la Caja", f"₡{total_caja_crc:,.2f}")
 
-                    st.subheader(f"Desglose de Pago de la CCSS ({mes_inicio} {int(anio_inicio)} - {mes_fin} {int(anio_fin)})")
+                    st.subheader(f"Desglose de Pago de la CCSS ({f_ini_str} al {f_fin_str})")
                     st.dataframe(
                         df_ccss_resumen.style.format(
                             {
@@ -414,10 +443,11 @@ elif menu == "3. Costo CCSS Patronal por Empresa":
                         use_container_width=True,
                     )
 
-                    with st.expander("🔍 Ver detalle mensual incluido en este cálculo"):
-                        cols_detalle_ver = ["Año_Num", "Mes", "Cedula", "Nombre", "Detalle", "Salario_Mensual_CRC", "CCSS_Obrero_CRC", "CCSS_Patronal_CRC"]
+                    with st.expander("🔍 Ver detalle por fecha exacta incluido en este cálculo"):
+                        df_emp_ord = df_emp.sort_values(by=["Fecha_DT", "Nombre"])
+                        cols_detalle_ver = ["Fecha_Registro", "Mes", "Cedula", "Nombre", "Detalle", "Salario_Mensual_CRC", "CCSS_Obrero_CRC", "CCSS_Patronal_CRC"]
                         st.dataframe(
-                            df_emp[cols_detalle_ver].rename(columns={"Año_Num": "Año"}).style.format(
+                            df_emp_ord[cols_detalle_ver].style.format(
                                 {
                                     "Salario_Mensual_CRC": "₡{:,.2f}",
                                     "CCSS_Obrero_CRC": "₡{:,.2f}",
@@ -435,10 +465,12 @@ elif menu == "3. Costo CCSS Patronal por Empresa":
                         revisado_por = st.text_input("Revisado por:", value="Gerencia General", key="rev_ccss")
 
                     nombre_limpio_emp = limpiar_nombre_archivo(empresa_sel)
-                    subtitulo_ccss = f"Reporte de Pago de Caja (CCSS) | Rango: {mes_inicio} {int(anio_inicio)} a {mes_fin} {int(anio_fin)}"
-                    nom_pdf = f"Reporte_CCSS_{nombre_limpio_emp}_{mes_inicio}{int(anio_inicio)}_a_{mes_fin}{int(anio_fin)}.pdf"
-                    nom_xlsx = f"Reporte_CCSS_{nombre_limpio_emp}_{mes_inicio}{int(anio_inicio)}_a_{mes_fin}{int(anio_fin)}.xlsx"
-                    nom_docx = f"Reporte_CCSS_{nombre_limpio_emp}_{mes_inicio}{int(anio_inicio)}_a_{mes_fin}{int(anio_fin)}.docx"
+                    f_ini_arch = fecha_inicio.strftime("%d-%m-%Y")
+                    f_fin_arch = fecha_fin.strftime("%d-%m-%Y")
+                    subtitulo_ccss = f"Reporte de Pago de Caja (CCSS) | Del {f_ini_str} al {f_fin_str}"
+                    nom_pdf = f"Reporte_CCSS_{nombre_limpio_emp}_{f_ini_arch}_al_{f_fin_arch}.pdf"
+                    nom_xlsx = f"Reporte_CCSS_{nombre_limpio_emp}_{f_ini_arch}_al_{f_fin_arch}.xlsx"
+                    nom_docx = f"Reporte_CCSS_{nombre_limpio_emp}_{f_ini_arch}_al_{f_fin_arch}.docx"
 
                     try:
                         data_pdf_ccss = generar_pdf_empresa(df_ccss_resumen, empresa_sel, subtitulo_ccss, elaborado_por, revisado_por)
@@ -483,7 +515,7 @@ elif menu == "3. Costo CCSS Patronal por Empresa":
 # --- MÓDULO 4: GESTOR DE REGISTROS HISTÓRICOS ---
 elif menu == "4. Gestor de Registros Históricos":
     st.title("4. Modificar o Eliminar Registros Históricos")
-    st.caption("Administre de forma directa la información en Google Sheets.")
+    st.caption("Administre de forma directa la información en Google Sheets (incluyendo Fecha_Registro en formato DD/MM/AAAA).")
 
     df_hist = cargar_datos_gsheet("Datos_Historicos", COLUMNAS_HISTORICO)
     df_hist = asegurar_calculos_historico(df_hist)
@@ -498,6 +530,7 @@ elif menu == "4. Gestor de Registros Históricos":
             use_container_width=True,
             column_config={
                 "Empresa": st.column_config.TextColumn("Empresa"),
+                "Fecha_Registro": st.column_config.TextColumn("Fecha Exacta (DD/MM/AAAA)"),
                 "Nombre": st.column_config.TextColumn("Nombre"),
                 "Detalle": st.column_config.TextColumn("Detalle"),
                 "Mes": st.column_config.SelectboxColumn("Mes", options=MESES),
@@ -517,7 +550,7 @@ elif menu == "4. Gestor de Registros Históricos":
 # --- MÓDULO 5: REPORTES Y EXPORTACIÓN ---
 elif menu == "5. Reportes y Exportación":
     st.title("5. Reportes Acumulativos y Prestaciones")
-    st.caption("Consolidado bimoneda por rango de fechas mensuales.")
+    st.caption("Consolidado bimoneda por rango exacto de fechas (Día / Mes / Año).")
 
     df_hist = cargar_datos_gsheet("Datos_Historicos", COLUMNAS_HISTORICO)
     df_hist = asegurar_calculos_historico(df_hist)
@@ -545,31 +578,41 @@ elif menu == "5. Reportes y Exportación":
 
             df_emp_base = df_hist[df_hist["Empresa"].str.lower() == empresa_sel.lower()].copy()
 
-            st.markdown("#### 📅 Rango de Fechas Mensuales a Consultar (Puede digitar años anteriores)")
-            col_r1, col_r2, col_r3, col_r4 = st.columns(4)
+            st.markdown("#### 📅 Rango de Fechas Exactas a Consultar (Día / Mes / Año)")
+            col_r1, col_r2 = st.columns(2)
             with col_r1:
-                mes_inicio = st.selectbox("Desde Mes:", MESES, index=0, key="rep_mes_ini")
+                fecha_inicio = st.date_input(
+                    "Desde Fecha (Día / Mes / Año):",
+                    value=datetime.date(2024, 1, 1),
+                    min_value=datetime.date(2015, 1, 1),
+                    max_value=datetime.date(2035, 12, 31),
+                    format="DD/MM/YYYY",
+                    key="rep_fecha_ini"
+                )
             with col_r2:
-                anio_inicio = st.number_input("Desde Año:", min_value=2015, max_value=2035, value=2024, step=1, key="rep_anio_ini")
-            with col_r3:
-                mes_fin = st.selectbox("Hasta Mes:", MESES, index=11, key="rep_mes_fin")
-            with col_r4:
-                anio_fin = st.number_input("Hasta Año:", min_value=2015, max_value=2035, value=2026, step=1, key="rep_anio_fin")
+                fecha_fin = st.date_input(
+                    "Hasta Fecha (Día / Mes / Año):",
+                    value=datetime.date(2026, 12, 31),
+                    min_value=datetime.date(2015, 1, 1),
+                    max_value=datetime.date(2035, 12, 31),
+                    format="DD/MM/YYYY",
+                    key="rep_fecha_fin"
+                )
 
-            periodo_ini = (int(anio_inicio) * 100) + MESES_MAP[mes_inicio]
-            periodo_fin = (int(anio_fin) * 100) + MESES_MAP[mes_fin]
-
-            if periodo_ini > periodo_fin:
-                st.error("⚠️ El periodo inicial ('Desde') no puede ser posterior al periodo final ('Hasta').")
+            if fecha_inicio > fecha_fin:
+                st.error("⚠️ La fecha inicial ('Desde') no puede ser posterior a la fecha final ('Hasta').")
             else:
                 df_emp = df_emp_base[
-                    (df_emp_base["Periodo_Orden"] >= periodo_ini) &
-                    (df_emp_base["Periodo_Orden"] <= periodo_fin)
+                    (df_emp_base["Fecha_DT"] >= fecha_inicio) &
+                    (df_emp_base["Fecha_DT"] <= fecha_fin)
                 ].copy()
+
+                f_ini_str = fecha_inicio.strftime("%d/%m/%Y")
+                f_fin_str = fecha_fin.strftime("%d/%m/%Y")
 
                 if df_emp.empty:
                     anios_ex = sorted(df_emp_base["Año_Num"].unique().tolist())
-                    st.warning(f"No hay registros salariales para **{empresa_sel}** en ese rango. Años con datos disponibles: **{anios_ex}**")
+                    st.warning(f"No hay registros salariales para **{empresa_sel}** entre **{f_ini_str}** y **{f_fin_str}**. Años con datos disponibles: **{anios_ex}**")
                 else:
                     df_emp["Total_Prestaciones_USD"] = df_emp["Total_Prestaciones_CRC"] / df_emp["Tipo_Cambio"]
 
@@ -580,7 +623,7 @@ elif menu == "5. Reportes y Exportación":
                             dropna=False,
                         )
                         .agg(
-                            Meses=("Mes", "count"),
+                            Registros=("Fecha_Registro", "count"),
                             Salario_CRC=("Salario_Mensual_CRC", "sum"),
                             Salario_USD=("Salario_Mensual_USD", "sum"),
                             CCSS_CRC=("CCSS_Obrero_CRC", "sum"),
@@ -593,7 +636,7 @@ elif menu == "5. Reportes y Exportación":
                         )
                     )
 
-                    st.subheader(f"Resumen Acumulado ({mes_inicio} {int(anio_inicio)} - {mes_fin} {int(anio_fin)}) - {empresa_sel}")
+                    st.subheader(f"Resumen Acumulado (Del {f_ini_str} al {f_fin_str}) - {empresa_sel}")
                     st.dataframe(
                         df_acum.style.format(
                             {
@@ -619,10 +662,12 @@ elif menu == "5. Reportes y Exportación":
                         revisado_por = st.text_input("Revisado por:", value="Gerencia General", key="rev_rep")
 
                     nombre_limpio_emp = limpiar_nombre_archivo(empresa_sel)
-                    subtitulo_rep = f"Reporte Acumulado de Planilla, CCSS y Prestaciones ({mes_inicio} {int(anio_inicio)} - {mes_fin} {int(anio_fin)})"
-                    nom_xlsx = f"Reporte_{nombre_limpio_emp}_{mes_inicio}{int(anio_inicio)}_a_{mes_fin}{int(anio_fin)}.xlsx"
-                    nom_docx = f"Reporte_{nombre_limpio_emp}_{mes_inicio}{int(anio_inicio)}_a_{mes_fin}{int(anio_fin)}.docx"
-                    nom_pdf = f"Reporte_{nombre_limpio_emp}_{mes_inicio}{int(anio_inicio)}_a_{mes_fin}{int(anio_fin)}.pdf"
+                    f_ini_arch = fecha_inicio.strftime("%d-%m-%Y")
+                    f_fin_arch = fecha_fin.strftime("%d-%m-%Y")
+                    subtitulo_rep = f"Reporte Acumulado de Planilla, CCSS y Prestaciones (Del {f_ini_str} al {f_fin_str})"
+                    nom_xlsx = f"Reporte_{nombre_limpio_emp}_{f_ini_arch}_al_{f_fin_arch}.xlsx"
+                    nom_docx = f"Reporte_{nombre_limpio_emp}_{f_ini_arch}_al_{f_fin_arch}.docx"
+                    nom_pdf = f"Reporte_{nombre_limpio_emp}_{f_ini_arch}_al_{f_fin_arch}.pdf"
 
                     try:
                         data_excel = generar_excel_empresa(df_acum, empresa_sel)
@@ -735,7 +780,7 @@ elif menu == "6. Respaldo y Restauración (Backup)":
 # --- MÓDULO 7: CONSULTA SALARIAL DETALLADA POR PERSONA Y RANGO DE FECHAS ---
 elif menu == "7. Consulta Salarial por Persona y Fechas":
     st.title("7. Consulta Salarial Detallada por Persona y Fechas")
-    st.caption("Detalle cronológico separado por cada fecha/mes en rangos cortos o largos, por persona o empresa.")
+    st.caption("Detalle cronológico separado por cada fecha exacta (Día / Mes / Año), por persona o empresa.")
 
     df_hist = cargar_datos_gsheet("Datos_Historicos", COLUMNAS_HISTORICO)
     df_hist = asegurar_calculos_historico(df_hist)
@@ -775,42 +820,50 @@ elif menu == "7. Consulta Salarial por Persona y Fechas":
                     key="det_persona_sel"
                 )
 
-            st.markdown("#### 📅 Rango de Fechas Mensuales a Consultar")
-            col_r1, col_r2, col_r3, col_r4 = st.columns(4)
+            st.markdown("#### 📅 Rango de Fechas Exactas a Consultar (Día / Mes / Año)")
+            col_r1, col_r2 = st.columns(2)
             with col_r1:
-                mes_inicio = st.selectbox("Desde Mes:", MESES, index=0, key="det_mes_ini")
+                fecha_inicio = st.date_input(
+                    "Desde Fecha (Día / Mes / Año):",
+                    value=datetime.date(2024, 1, 1),
+                    min_value=datetime.date(2015, 1, 1),
+                    max_value=datetime.date(2035, 12, 31),
+                    format="DD/MM/YYYY",
+                    key="det_fecha_ini"
+                )
             with col_r2:
-                anio_inicio = st.number_input("Desde Año:", min_value=2015, max_value=2035, value=2024, step=1, key="det_anio_ini")
-            with col_r3:
-                mes_fin = st.selectbox("Hasta Mes:", MESES, index=11, key="det_mes_fin")
-            with col_r4:
-                anio_fin = st.number_input("Hasta Año:", min_value=2015, max_value=2035, value=2026, step=1, key="det_anio_fin")
+                fecha_fin = st.date_input(
+                    "Hasta Fecha (Día / Mes / Año):",
+                    value=datetime.date(2026, 12, 31),
+                    min_value=datetime.date(2015, 1, 1),
+                    max_value=datetime.date(2035, 12, 31),
+                    format="DD/MM/YYYY",
+                    key="det_fecha_fin"
+                )
 
-            periodo_ini = (int(anio_inicio) * 100) + MESES_MAP[mes_inicio]
-            periodo_fin = (int(anio_fin) * 100) + MESES_MAP[mes_fin]
-
-            if periodo_ini > periodo_fin:
-                st.error("⚠️ El periodo inicial ('Desde') no puede ser posterior al periodo final ('Hasta').")
+            if fecha_inicio > fecha_fin:
+                st.error("⚠️ La fecha inicial ('Desde') no puede ser posterior a la fecha final ('Hasta').")
             else:
                 df_filtrado = df_emp_base[
-                    (df_emp_base["Periodo_Orden"] >= periodo_ini) &
-                    (df_emp_base["Periodo_Orden"] <= periodo_fin)
+                    (df_emp_base["Fecha_DT"] >= fecha_inicio) &
+                    (df_emp_base["Fecha_DT"] <= fecha_fin)
                 ].copy()
 
                 if persona_sel != "Todos los colaboradores":
                     df_filtrado = df_filtrado[df_filtrado["Nombre"].str.lower() == persona_sel.lower()].copy()
 
+                f_ini_str = fecha_inicio.strftime("%d/%m/%Y")
+                f_fin_str = fecha_fin.strftime("%d/%m/%Y")
+
                 if df_filtrado.empty:
                     anios_ex = sorted(df_emp_base["Año_Num"].unique().tolist())
                     st.warning(
-                        f"No hay registros salariales para **{persona_sel}** en **{empresa_sel}** dentro del rango seleccionado. "
+                        f"No hay registros salariales para **{persona_sel}** en **{empresa_sel}** entre **{f_ini_str}** y **{f_fin_str}**. "
                         f"Años con datos registrados: **{anios_ex}**"
                     )
                 else:
-                    # Ordenar cronológicamente por fecha (Año y Mes) y luego por Nombre
-                    df_filtrado = df_filtrado.sort_values(by=["Periodo_Orden", "Nombre"], ascending=[True, True]).reset_index(drop=True)
+                    df_filtrado = df_filtrado.sort_values(by=["Fecha_DT", "Nombre"], ascending=[True, True]).reset_index(drop=True)
 
-                    # Métricas resumen del periodo consultado
                     st.markdown("---")
                     m1, m2, m3, m4 = st.columns(4)
                     m1.metric("Registros / Fechas Encontradas", len(df_filtrado))
@@ -818,10 +871,9 @@ elif menu == "7. Consulta Salarial por Persona y Fechas":
                     m3.metric("Total Salario Bruto (USD)", f"${df_filtrado['Salario_Mensual_USD'].sum():,.2f}")
                     m4.metric("Total Salario Neto (CRC)", f"₡{df_filtrado['Salario_Neto_CRC'].sum():,.2f}")
 
-                    # Tabla detallada con cada fecha por separado
                     df_reporte_det = df_filtrado[
                         [
-                            "Año",
+                            "Fecha_Registro",
                             "Mes",
                             "Cedula",
                             "Nombre",
@@ -836,7 +888,7 @@ elif menu == "7. Consulta Salarial por Persona y Fechas":
                         ]
                     ].copy()
 
-                    st.subheader(f"Detalle Salarial por Fecha ({mes_inicio} {int(anio_inicio)} - {mes_fin} {int(anio_fin)}) | {persona_sel}")
+                    st.subheader(f"Detalle Salarial por Fecha (Del {f_ini_str} al {f_fin_str}) | {persona_sel}")
                     st.dataframe(
                         df_reporte_det.style.format(
                             {
@@ -859,11 +911,13 @@ elif menu == "7. Consulta Salarial por Persona y Fechas":
 
                     nombre_limpio_emp = limpiar_nombre_archivo(empresa_sel)
                     nombre_limpio_per = limpiar_nombre_archivo(persona_sel)
-                    subtitulo_det = f"Detalle Salarial por Fecha | {persona_sel} ({mes_inicio} {int(anio_inicio)} - {mes_fin} {int(anio_fin)})"
+                    f_ini_arch = fecha_inicio.strftime("%d-%m-%Y")
+                    f_fin_arch = fecha_fin.strftime("%d-%m-%Y")
+                    subtitulo_det = f"Detalle Salarial por Fecha | {persona_sel} (Del {f_ini_str} al {f_fin_str})"
 
-                    nom_xlsx = f"Detalle_Salarios_{nombre_limpio_emp}_{nombre_limpio_per}_{mes_inicio}{int(anio_inicio)}_a_{mes_fin}{int(anio_fin)}.xlsx"
-                    nom_docx = f"Detalle_Salarios_{nombre_limpio_emp}_{nombre_limpio_per}_{mes_inicio}{int(anio_inicio)}_a_{mes_fin}{int(anio_fin)}.docx"
-                    nom_pdf = f"Detalle_Salarios_{nombre_limpio_emp}_{nombre_limpio_per}_{mes_inicio}{int(anio_inicio)}_a_{mes_fin}{int(anio_fin)}.pdf"
+                    nom_xlsx = f"Detalle_Salarios_{nombre_limpio_emp}_{nombre_limpio_per}_{f_ini_arch}_al_{f_fin_arch}.xlsx"
+                    nom_docx = f"Detalle_Salarios_{nombre_limpio_emp}_{nombre_limpio_per}_{f_ini_arch}_al_{f_fin_arch}.docx"
+                    nom_pdf = f"Detalle_Salarios_{nombre_limpio_emp}_{nombre_limpio_per}_{f_ini_arch}_al_{f_fin_arch}.pdf"
 
                     try:
                         data_excel = generar_excel_empresa(df_reporte_det, empresa_sel)
