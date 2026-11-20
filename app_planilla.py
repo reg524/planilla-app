@@ -27,6 +27,22 @@ st.set_page_config(
     layout="wide",
 )
 
+def limpiar_columnas_agrupacion(df, mapeo_defecto):
+    """Garantiza que no existan valores None/NaN en columnas de agrupación de Pandas"""
+    df_out = df.copy()
+    for col, valor_defecto in mapeo_defecto.items():
+        if col not in df_out.columns:
+            df_out[col] = valor_defecto
+        else:
+            df_out[col] = (
+                df_out[col]
+                .fillna(valor_defecto)
+                .astype(str)
+                .str.strip()
+                .replace(["", "None", "nan", "NaN", "<NA>", "null"], valor_defecto)
+            )
+    return df_out
+
 # --- BARRA LATERAL ---
 st.sidebar.title("Módulos del Sistema (Sincronizado)")
 
@@ -306,10 +322,15 @@ elif menu == "3. Costo CCSS Patronal por Empresa":
     if df_hist.empty:
         st.error("❌ La hoja 'Datos_Historicos' en Google Sheets se leyó vacía (0 filas).")
     else:
-        df_hist["Empresa"] = df_hist["Empresa"].replace("", "Sin Empresa")
-        df_hist["Cedula"] = df_hist["Cedula"].replace("", "S/C")
-        df_hist["Nombre"] = df_hist["Nombre"].replace("", "Sin Nombre")
-        df_hist["Puesto"] = df_hist["Puesto"].replace("", "Sin Puesto")
+        df_hist = limpiar_columnas_agrupacion(
+            df_hist,
+            {
+                "Empresa": "Sin Empresa",
+                "Cedula": "S/C",
+                "Nombre": "Sin Nombre",
+                "Puesto": "Sin Puesto",
+            },
+        )
 
         empresas_disponibles = sorted([e for e in df_hist["Empresa"].unique() if e != "Sin Empresa"])
         
@@ -349,7 +370,7 @@ elif menu == "3. Costo CCSS Patronal por Empresa":
                     df_emp["Pago_Total_Caja_USD"] = df_emp["Pago_Total_Caja_CRC"] / df_emp["Tipo_Cambio"]
 
                     df_ccss_resumen = (
-                        df_emp.groupby(["Cedula", "Nombre", "Puesto"], as_index=False)
+                        df_emp.groupby(["Cedula", "Nombre", "Puesto"], as_index=False, dropna=False)
                         .agg(
                             Meses=("Mes", "count"),
                             Salario_CRC=("Salario_Mensual_CRC", "sum"),
@@ -487,13 +508,19 @@ elif menu == "5. Reportes y Exportación":
     if df_hist.empty:
         st.error("❌ La hoja 'Datos_Historicos' en Google Sheets se leyó vacía (0 filas).")
     else:
-        df_hist["Cedula"] = df_hist["Cedula"].replace("", "S/C")
-        df_hist["Nombre"] = df_hist["Nombre"].replace("", "Sin Nombre")
-        df_hist["Puesto"] = df_hist["Puesto"].replace("", "Sin Puesto")
-        df_hist["Fecha_Ingreso"] = df_hist["Fecha_Ingreso"].replace("", "N/A")
-        df_hist["Fecha_Salida"] = df_hist["Fecha_Salida"].replace("", "Activo")
+        df_hist = limpiar_columnas_agrupacion(
+            df_hist,
+            {
+                "Empresa": "Sin Empresa",
+                "Cedula": "S/C",
+                "Nombre": "Sin Nombre",
+                "Puesto": "Sin Puesto",
+                "Fecha_Ingreso": "N/A",
+                "Fecha_Salida": "Activo",
+            },
+        )
 
-        empresas_disponibles = sorted([str(e) for e in df_hist["Empresa"].dropna().unique() if str(e).strip() != ""])
+        empresas_disponibles = sorted([e for e in df_hist["Empresa"].unique() if e != "Sin Empresa"])
         if not empresas_disponibles:
             st.warning(f"⚠️ Se leyeron {len(df_hist)} filas, pero no hay nombres de empresa en la columna 'Empresa'.")
         else:
@@ -532,7 +559,8 @@ elif menu == "5. Reportes y Exportación":
                     df_acum = (
                         df_emp.groupby(
                             ["Cedula", "Nombre", "Puesto", "Fecha_Ingreso", "Fecha_Salida"], 
-                            as_index=False
+                            as_index=False,
+                            dropna=False,
                         )
                         .agg(
                             Meses=("Mes", "count"),
