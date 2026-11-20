@@ -66,6 +66,7 @@ menu = st.sidebar.radio(
         "4. Gestor de Registros Históricos",
         "5. Reportes y Exportación",
         "6. Respaldo y Restauración (Backup)",
+        "7. Consulta Salarial por Persona y Fechas",
     ],
 )
 
@@ -730,3 +731,176 @@ elif menu == "6. Respaldo y Restauración (Backup)":
                     st.balloons()
                 else:
                     st.error(f"❌ {mensaje}")
+
+# --- MÓDULO 7: CONSULTA SALARIAL DETALLADA POR PERSONA Y RANGO DE FECHAS ---
+elif menu == "7. Consulta Salarial por Persona y Fechas":
+    st.title("7. Consulta Salarial Detallada por Persona y Fechas")
+    st.caption("Detalle cronológico separado por cada fecha/mes en rangos cortos o largos, por persona o empresa.")
+
+    df_hist = cargar_datos_gsheet("Datos_Historicos", COLUMNAS_HISTORICO)
+    df_hist = asegurar_calculos_historico(df_hist)
+
+    if df_hist.empty:
+        st.error("❌ La hoja 'Datos_Historicos' en Google Sheets se leyó vacía (0 filas).")
+    else:
+        df_hist = limpiar_columnas_agrupacion(
+            df_hist,
+            {
+                "Empresa": "Sin Empresa",
+                "Cedula": "S/C",
+                "Nombre": "Sin Nombre",
+                "Puesto": "Sin Puesto",
+                "Detalle": "Salario Ordinario",
+                "Moneda": "CRC",
+            },
+        )
+
+        empresas_disponibles = sorted([e for e in df_hist["Empresa"].unique() if e != "Sin Empresa"])
+        if not empresas_disponibles:
+            st.warning("⚠️ No se encontraron empresas con registros salariales.")
+        else:
+            col_f_emp, col_f_per = st.columns(2)
+            with col_f_emp:
+                empresa_sel = st.selectbox("Seleccione la Empresa:", empresas_disponibles, key="det_emp_sel")
+
+            df_emp_base = df_hist[df_hist["Empresa"].str.lower() == empresa_sel.lower()].copy()
+
+            personas_disponibles = sorted([p for p in df_emp_base["Nombre"].unique() if p != "Sin Nombre"])
+            opciones_persona = ["Todos los colaboradores"] + personas_disponibles
+
+            with col_f_per:
+                persona_sel = st.selectbox(
+                    "Seleccione la Persona a Consultar:",
+                    opciones_persona,
+                    key="det_persona_sel"
+                )
+
+            st.markdown("#### 📅 Rango de Fechas Mensuales a Consultar")
+            col_r1, col_r2, col_r3, col_r4 = st.columns(4)
+            with col_r1:
+                mes_inicio = st.selectbox("Desde Mes:", MESES, index=0, key="det_mes_ini")
+            with col_r2:
+                anio_inicio = st.number_input("Desde Año:", min_value=2015, max_value=2035, value=2024, step=1, key="det_anio_ini")
+            with col_r3:
+                mes_fin = st.selectbox("Hasta Mes:", MESES, index=11, key="det_mes_fin")
+            with col_r4:
+                anio_fin = st.number_input("Hasta Año:", min_value=2015, max_value=2035, value=2026, step=1, key="det_anio_fin")
+
+            periodo_ini = (int(anio_inicio) * 100) + MESES_MAP[mes_inicio]
+            periodo_fin = (int(anio_fin) * 100) + MESES_MAP[mes_fin]
+
+            if periodo_ini > periodo_fin:
+                st.error("⚠️ El periodo inicial ('Desde') no puede ser posterior al periodo final ('Hasta').")
+            else:
+                df_filtrado = df_emp_base[
+                    (df_emp_base["Periodo_Orden"] >= periodo_ini) &
+                    (df_emp_base["Periodo_Orden"] <= periodo_fin)
+                ].copy()
+
+                if persona_sel != "Todos los colaboradores":
+                    df_filtrado = df_filtrado[df_filtrado["Nombre"].str.lower() == persona_sel.lower()].copy()
+
+                if df_filtrado.empty:
+                    anios_ex = sorted(df_emp_base["Año_Num"].unique().tolist())
+                    st.warning(
+                        f"No hay registros salariales para **{persona_sel}** en **{empresa_sel}** dentro del rango seleccionado. "
+                        f"Años con datos registrados: **{anios_ex}**"
+                    )
+                else:
+                    # Ordenar cronológicamente por fecha (Año y Mes) y luego por Nombre
+                    df_filtrado = df_filtrado.sort_values(by=["Periodo_Orden", "Nombre"], ascending=[True, True]).reset_index(drop=True)
+
+                    # Métricas resumen del periodo consultado
+                    st.markdown("---")
+                    m1, m2, m3, m4 = st.columns(4)
+                    m1.metric("Registros / Fechas Encontradas", len(df_filtrado))
+                    m2.metric("Total Salario Bruto (CRC)", f"₡{df_filtrado['Salario_Mensual_CRC'].sum():,.2f}")
+                    m3.metric("Total Salario Bruto (USD)", f"${df_filtrado['Salario_Mensual_USD'].sum():,.2f}")
+                    m4.metric("Total Salario Neto (CRC)", f"₡{df_filtrado['Salario_Neto_CRC'].sum():,.2f}")
+
+                    # Tabla detallada con cada fecha por separado
+                    df_reporte_det = df_filtrado[
+                        [
+                            "Año",
+                            "Mes",
+                            "Cedula",
+                            "Nombre",
+                            "Puesto",
+                            "Detalle",
+                            "Moneda",
+                            "Tipo_Cambio",
+                            "Salario_Mensual_CRC",
+                            "Salario_Mensual_USD",
+                            "CCSS_Obrero_CRC",
+                            "Salario_Neto_CRC",
+                        ]
+                    ].copy()
+
+                    st.subheader(f"Detalle Salarial por Fecha ({mes_inicio} {int(anio_inicio)} - {mes_fin} {int(anio_fin)}) | {persona_sel}")
+                    st.dataframe(
+                        df_reporte_det.style.format(
+                            {
+                                "Tipo_Cambio": "₡{:,.2f}",
+                                "Salario_Mensual_CRC": "₡{:,.2f}",
+                                "Salario_Mensual_USD": "${:,.2f}",
+                                "CCSS_Obrero_CRC": "₡{:,.2f}",
+                                "Salario_Neto_CRC": "₡{:,.2f}",
+                            }
+                        ),
+                        use_container_width=True,
+                    )
+
+                    st.subheader("✍️ Responsables de Firma y Exportación (Excel, Word y PDF)")
+                    col_f1, col_f2 = st.columns(2)
+                    with col_f1:
+                        elaborado_por = st.text_input("Elaborado por:", value="Lic. Roy F. Esquivel González", key="el_det")
+                    with col_f2:
+                        revisado_por = st.text_input("Revisado por:", value="Gerencia General", key="rev_det")
+
+                    nombre_limpio_emp = limpiar_nombre_archivo(empresa_sel)
+                    nombre_limpio_per = limpiar_nombre_archivo(persona_sel)
+                    subtitulo_det = f"Detalle Salarial por Fecha | {persona_sel} ({mes_inicio} {int(anio_inicio)} - {mes_fin} {int(anio_fin)})"
+
+                    nom_xlsx = f"Detalle_Salarios_{nombre_limpio_emp}_{nombre_limpio_per}_{mes_inicio}{int(anio_inicio)}_a_{mes_fin}{int(anio_fin)}.xlsx"
+                    nom_docx = f"Detalle_Salarios_{nombre_limpio_emp}_{nombre_limpio_per}_{mes_inicio}{int(anio_inicio)}_a_{mes_fin}{int(anio_fin)}.docx"
+                    nom_pdf = f"Detalle_Salarios_{nombre_limpio_emp}_{nombre_limpio_per}_{mes_inicio}{int(anio_inicio)}_a_{mes_fin}{int(anio_fin)}.pdf"
+
+                    try:
+                        data_excel = generar_excel_empresa(df_reporte_det, empresa_sel)
+                        data_word = generar_word_empresa(df_reporte_det, empresa_sel, subtitulo_det, elaborado_por, revisado_por)
+                        data_pdf = generar_pdf_empresa(df_reporte_det, empresa_sel, subtitulo_det, elaborado_por, revisado_por)
+
+                        ruta_local = guardar_copia_local_opcional(data_pdf, nom_pdf)
+                        guardar_copia_local_opcional(data_excel, nom_xlsx)
+                        guardar_copia_local_opcional(data_word, nom_docx)
+
+                        if ruta_local:
+                            st.success(f"📂 Copia local guardada automáticamente en: `{ruta_local}`")
+
+                        col_exp1, col_exp2, col_exp3 = st.columns(3)
+                        with col_exp1:
+                            st.download_button(
+                                label="🟢 Descargar Excel (.xlsx)",
+                                data=data_excel,
+                                file_name=nom_xlsx,
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key="dl_xlsx_det"
+                            )
+                        with col_exp2:
+                            st.download_button(
+                                label="🔵 Descargar Word (.docx)",
+                                data=data_word,
+                                file_name=nom_docx,
+                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                key="dl_docx_det"
+                            )
+                        with col_exp3:
+                            st.download_button(
+                                label="🔴 Descargar PDF (.pdf)",
+                                data=data_pdf,
+                                file_name=nom_pdf,
+                                mime="application/pdf",
+                                key="dl_pdf_det"
+                            )
+                    except Exception as e:
+                        st.error(f"Error técnico al construir los archivos del reporte: {e}")
