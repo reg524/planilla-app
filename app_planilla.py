@@ -670,7 +670,7 @@ elif menu == "6. Respaldo y Restauración (Backup)":
 
     st.subheader("1️⃣ Generar y Descargar Respaldo (Backup)")
     st.write(
-        "Este respaldo crea un archivo Excel maestro (`.xlsx`) con las tres bases de datos completas del sistema: "
+        "Este respaldo crea un archivo Excel maestro llamado **`bakcup planilla`** (`.xlsx`) con las tres bases de datos completas del sistema: "
         "**Empresas**, **Empleados** y **Datos_Historicos**."
     )
 
@@ -685,15 +685,15 @@ elif menu == "6. Respaldo y Restauración (Backup)":
         c3.metric("Registros Históricos a respaldar", len(df_hist_stat))
 
         fecha_hoy_str = datetime.datetime.now().strftime("%Y%m%d_%H%M")
-        nombre_bkp = f"Backup_Planilla_Completo_{fecha_hoy_str}.xlsx"
+        nombre_bkp = f"bakcup planilla_{fecha_hoy_str}.xlsx"
         bytes_backup = generar_backup_completo_excel()
 
-        ruta_bkp_local = guardar_copia_local_opcional(bytes_backup, nombre_bkp)
+        ruta_bkp_local = guardar_copia_local_opcional(bytes_backup, nombre_bkp, subcarpeta="bakcup planilla")
         if ruta_bkp_local:
-            st.success(f"💾 Copia de seguridad guardada automáticamente en tu equipo: `{ruta_bkp_local}`")
+            st.success(f"💾 Copia de seguridad guardada automáticamente en: `{ruta_bkp_local}`")
 
         st.download_button(
-            label="📦 Descargar Archivo de Respaldo (.xlsx)",
+            label="📦 Descargar Archivo 'bakcup planilla' (.xlsx)",
             data=bytes_backup,
             file_name=nombre_bkp,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

@@ -209,10 +209,13 @@ def obtener_tipo_cambio_compra_bccr(fecha_dt):
     return 515.00
 
 
-def guardar_copia_local_opcional(bytes_data, nombre_archivo):
+def guardar_copia_local_opcional(bytes_data, nombre_archivo, subcarpeta="Reportes_Generados"):
+    """Guarda automáticamente en C:\\Users\\Usuario\\<subcarpeta> (o carpeta local del proyecto) en Windows"""
     try:
         if os.name == "nt":
-            carpeta = os.path.join(os.getcwd(), "Reportes_Generados")
+            ruta_usuario = r"C:\Users\Usuario"
+            base_dir = ruta_usuario if os.path.exists(ruta_usuario) else os.getcwd()
+            carpeta = os.path.join(base_dir, subcarpeta)
             os.makedirs(carpeta, exist_ok=True)
             ruta_completa = os.path.join(carpeta, nombre_archivo)
             with open(ruta_completa, "wb") as f:
@@ -307,7 +310,6 @@ def _establecer_margenes_celda(cell, top=40, bottom=40, left=50, right=50):
 def generar_word_empresa(df_emp, nombre_empresa, titulo_reporte, elaborado_por, revisado_por):
     doc = Document()
 
-    # Configurar hoja en orientación HORIZONTAL (Landscape) y márgenes estrechos para que quepan todas las columnas
     section = doc.sections[0]
     section.orientation = WD_ORIENT.LANDSCAPE
     section.page_width = Inches(11.0)
@@ -317,7 +319,6 @@ def generar_word_empresa(df_emp, nombre_empresa, titulo_reporte, elaborado_por, 
     section.left_margin = Inches(0.4)
     section.right_margin = Inches(0.4)
 
-    # Encabezado institucional
     p_emp = doc.add_paragraph()
     p_emp.alignment = WD_ALIGN_PARAGRAPH.CENTER
     p_emp.paragraph_format.space_after = Pt(2)
@@ -336,13 +337,11 @@ def generar_word_empresa(df_emp, nombre_empresa, titulo_reporte, elaborado_por, 
     run_tit.font.size = Pt(11)
     run_tit.font.color.rgb = RGBColor(0x2E, 0x40, 0x53)
 
-    # Tabla ajustada al ancho disponible (10.2 pulgadas)
     table = doc.add_table(rows=1, cols=len(df_emp.columns))
     table.style = "Table Grid"
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
     table.autofit = True
 
-    # Fila de encabezados
     hdr_cells = table.rows[0].cells
     for i, col_name in enumerate(df_emp.columns):
         cell = hdr_cells[i]
@@ -359,7 +358,6 @@ def generar_word_empresa(df_emp, nombre_empresa, titulo_reporte, elaborado_por, 
         run.font.size = Pt(7.5)
         run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
 
-    # Filas de datos
     for idx_row, (_, row) in enumerate(df_emp.iterrows()):
         row_cells = table.add_row().cells
         bg_hex = "F4F6F9" if idx_row % 2 == 1 else "FFFFFF"
@@ -386,7 +384,6 @@ def generar_word_empresa(df_emp, nombre_empresa, titulo_reporte, elaborado_por, 
             run.font.name = "Calibri"
             run.font.size = Pt(7.5)
 
-    # Tabla de firmas al pie
     doc.add_paragraph("\n")
     tabla_firmas = doc.add_table(rows=1, cols=2)
     tabla_firmas.alignment = WD_TABLE_ALIGNMENT.CENTER
