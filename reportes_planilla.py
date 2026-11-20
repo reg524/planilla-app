@@ -1,4 +1,6 @@
+import html
 import io
+import os
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -38,7 +40,12 @@ def get_gsheet_connection():
     return st.connection("gsheets", type=GSheetsConnection)
 
 def limpiar_nombre_archivo(texto):
-    return re.sub(r'[\\/*?:"<>|]', "_", str(texto)).strip()
+    limpio = re.sub(r'[\\/*?:"<>|&]', "_", str(texto)).strip()
+    return limpio if limpio else "Reporte"
+
+def escapar_xml(texto):
+    """Escapa caracteres como &, <, > para evitar que ReportLab falle al generar PDF"""
+    return html.escape(str(texto)) if pd.notnull(texto) else ""
 
 def limpiar_numero_serie(serie):
     return (
@@ -115,7 +122,6 @@ def asegurar_calculos_historico(df):
     if "Detalle" not in df.columns:
         df["Detalle"] = ""
 
-    # Limpieza segura del Año (maneja "2024.0", "2024", espacios, etc.)
     anio_limpio = df.get("Año", "2026").astype(str).str.replace(".0", "", regex=False).str.strip()
     df["Año_Num"] = pd.to_numeric(anio_limpio, errors="coerce").fillna(2026).astype(int)
     df["Año"] = df["Año_Num"]
@@ -130,7 +136,6 @@ def asegurar_calculos_historico(df):
     df["Tipo_Cambio"] = limpiar_numero_serie(df.get("Tipo_Cambio", pd.Series(515.0, index=df.index)))
     df["Tipo_Cambio"] = df["Tipo_Cambio"].apply(lambda x: x if x > 0 else 515.0)
 
-    # Reconstruir Salario_Mensual_CRC si registros antiguos lo traen en 0
     mask_crc_cero = df["Salario_Mensual_CRC"] <= 0
     if mask_crc_cero.any():
         es_usd = df["Moneda"].astype(str).str.upper().str.contains("USD|DOLAR")
@@ -188,6 +193,20 @@ def obtener_tipo_cambio_compra_bccr(fecha_dt):
         pass
     return 515.00
 
+def guardar_copia_local_opcional(bytes_data, nombre_archivo):
+    """Guarda una copia física en la carpeta Reportes_Generados si se ejecuta en PC Windows"""
+    try:
+        if os.name == "nt":
+            carpeta = os.path.join(os.getcwd(), "Reportes_Generados")
+            os.makedirs(carpeta, exist_ok=True)
+            ruta_completa = os.path.join(carpeta, nombre_archivo)
+            with open(ruta_completa, "wb") as f:
+                f.write(bytes_data)
+            return ruta_completa
+    except Exception:
+        pass
+    return None
+
 def generar_excel_empresa(df_emp, nombre_empresa):
     output = io.BytesIO()
     hoja = limpiar_nombre_archivo(nombre_empresa)[:30] or "Reporte"
@@ -210,7 +229,7 @@ def generar_word_empresa(df_emp, nombre_empresa, titulo_reporte, elaborado_por, 
     for _, row in df_emp.iterrows():
         row_cells = table.add_row().cells
         for i, (col_name, val) in enumerate(zip(df_emp.columns, row)):
-            if isinstance(val, float):
+            if isinstance(val, (float, int)) and not isinstance(val, bool) and str(col_name) not in ["Meses", "Año"]:
                 row_cells[i].text = f"${val:,.2f}" if "USD" in str(col_name) else f"₡{val:,.2f}"
             else:
                 row_cells[i].text = str(val) if pd.notnull(val) else ""
@@ -247,20 +266,20 @@ def generar_pdf_empresa(df_emp, nombre_empresa, titulo_reporte, elaborado_por, r
     style_cell = ParagraphStyle('CellText', fontName='Helvetica', fontSize=6.5, leading=8, alignment=1)
     style_header = ParagraphStyle('HeaderStyle', fontName='Helvetica-Bold', fontSize=6.5, leading=8, textColor=colors.whitesmoke, alignment=1)
 
-    elements.append(Paragraph(f"<b>{str(nombre_empresa).upper()}</b>", style_title))
-    elements.append(Paragraph(f"<b>{titulo_reporte}</b>", style_title))
+    elements.append(Paragraph(f"<b>{escapar_xml(nombre_empresa).upper()}</b>", style_title))
+    elements.append(Paragraph(f"<b>{escapar_xml(titulo_reporte)}</b>", style_title))
     elements.append(Spacer(1, 8))
 
-    headers = [Paragraph(str(col).replace("_", " "), style_header) for col in df_emp.columns]
+    headers = [Paragraph(escapar_xml(str(col).replace("_", " ")), style_header) for col in df_emp.columns]
     data = [headers]
 
     for _, row in df_emp.iterrows():
         fila_formateada = []
         for col_name, val in zip(df_emp.columns, row):
-            if isinstance(val, float):
+            if isinstance(val, (float, int)) and not isinstance(val, bool) and str(col_name) not in ["Meses", "Año"]:
                 texto = f"${val:,.2f}" if "USD" in str(col_name) else f"₡{val:,.2f}"
             else:
-                texto = str(val) if pd.notnull(val) else ""
+                texto = escapar_xml(val)
             fila_formateada.append(Paragraph(texto, style_cell))
         data.append(fila_formateada)
 
@@ -285,8 +304,8 @@ def generar_pdf_empresa(df_emp, nombre_empresa, titulo_reporte, elaborado_por, r
 
     firmas_data = [
         [
-            Paragraph(f"<b>Elaborado por:</b> {elaborado_por}", ParagraphStyle('Firma', fontName='Helvetica', fontSize=8.5)),
-            Paragraph(f"<b>Revisado por:</b> {revisado_por}", ParagraphStyle('Firma', fontName='Helvetica', fontSize=8.5)),
+            Paragraph(f"<b>Elaborado por:</b> {escapar_xml(elaborado_por)}", ParagraphStyle('Firma', fontName='Helvetica', fontSize=8.5)),
+            Paragraph(f"<b>Revisado por:</b> {escapar_xml(revisado_por)}", ParagraphStyle('Firma', fontName='Helvetica', fontSize=8.5)),
         ]
     ]
     t_firmas = Table(firmas_data, colWidths=[381, 381])

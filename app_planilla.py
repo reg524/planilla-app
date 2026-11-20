@@ -15,6 +15,7 @@ from reportes_planilla import (
     generar_excel_empresa,
     generar_pdf_empresa,
     generar_word_empresa,
+    guardar_copia_local_opcional,
     guardar_datos_gsheet,
     limpiar_nombre_archivo,
     obtener_tipo_cambio_compra_bccr,
@@ -303,7 +304,7 @@ elif menu == "3. Costo CCSS Patronal por Empresa":
     df_hist = asegurar_calculos_historico(df_hist)
 
     if df_hist.empty:
-        st.error("❌ La hoja 'Datos_Historicos' en Google Sheets se leyó vacía (0 filas). Verifique que los datos estén en esa pestaña y presione 'Actualizar Datos de la Nube'.")
+        st.error("❌ La hoja 'Datos_Historicos' en Google Sheets se leyó vacía (0 filas).")
     else:
         df_hist["Empresa"] = df_hist["Empresa"].replace("", "Sin Empresa")
         df_hist["Cedula"] = df_hist["Cedula"].replace("", "S/C")
@@ -400,8 +401,7 @@ elif menu == "3. Costo CCSS Patronal por Empresa":
                             use_container_width=True,
                         )
 
-                    st.subheader("✍️ Responsables de Firma y Descarga Directa")
-                    st.info("💡 **Nota:** Si utiliza el sistema dentro de Microsoft Teams y el navegador bloquea la descarga directa, abra el enlace de la aplicación en Google Chrome o Microsoft Edge.")
+                    st.subheader("✍️ Responsables de Firma y Descarga de Archivos")
                     col_f1, col_f2 = st.columns(2)
                     with col_f1:
                         elaborado_por = st.text_input("Elaborado por:", value="Lic. Roy F. Esquivel González", key="el_ccss")
@@ -410,32 +410,37 @@ elif menu == "3. Costo CCSS Patronal por Empresa":
 
                     nombre_limpio_emp = limpiar_nombre_archivo(empresa_sel)
                     subtitulo_ccss = f"Reporte de Pago de Caja (CCSS) | Rango: {mes_inicio} {int(anio_inicio)} a {mes_fin} {int(anio_fin)}"
+                    nom_pdf = f"Reporte_CCSS_{nombre_limpio_emp}_{mes_inicio}{int(anio_inicio)}_a_{mes_fin}{int(anio_fin)}.pdf"
+                    nom_xlsx = f"Reporte_CCSS_{nombre_limpio_emp}_{mes_inicio}{int(anio_inicio)}_a_{mes_fin}{int(anio_fin)}.xlsx"
 
-                    col_btn1, col_btn2 = st.columns(2)
-                    with col_btn1:
-                        data_pdf_ccss = generar_pdf_empresa(
-                            df_ccss_resumen,
-                            empresa_sel,
-                            subtitulo_ccss,
-                            elaborado_por,
-                            revisado_por,
-                        )
-                        st.download_button(
-                            label="🔴 Descargar Reporte CCSS (.pdf)",
-                            data=data_pdf_ccss,
-                            file_name=f"Reporte_CCSS_{nombre_limpio_emp}_{mes_inicio}{int(anio_inicio)}_a_{mes_fin}{int(anio_fin)}.pdf",
-                            mime="application/pdf",
-                            key="dl_pdf_ccss"
-                        )
-                    with col_btn2:
+                    try:
+                        data_pdf_ccss = generar_pdf_empresa(df_ccss_resumen, empresa_sel, subtitulo_ccss, elaborado_por, revisado_por)
                         data_excel_ccss = generar_excel_empresa(df_ccss_resumen, empresa_sel)
-                        st.download_button(
-                            label="🟢 Descargar Reporte CCSS (.xlsx)",
-                            data=data_excel_ccss,
-                            file_name=f"Reporte_CCSS_{nombre_limpio_emp}_{mes_inicio}{int(anio_inicio)}_a_{mes_fin}{int(anio_fin)}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key="dl_xlsx_ccss"
-                        )
+                        ruta_local = guardar_copia_local_opcional(data_pdf_ccss, nom_pdf)
+                        guardar_copia_local_opcional(data_excel_ccss, nom_xlsx)
+
+                        if ruta_local:
+                            st.success(f"📂 Copia local guardada automáticamente en: `{ruta_local}`")
+
+                        col_btn1, col_btn2 = st.columns(2)
+                        with col_btn1:
+                            st.download_button(
+                                label="🔴 Descargar Reporte CCSS (.pdf)",
+                                data=data_pdf_ccss,
+                                file_name=nom_pdf,
+                                mime="application/pdf",
+                                key="dl_pdf_ccss"
+                            )
+                        with col_btn2:
+                            st.download_button(
+                                label="🟢 Descargar Reporte CCSS (.xlsx)",
+                                data=data_excel_ccss,
+                                file_name=nom_xlsx,
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key="dl_xlsx_ccss"
+                            )
+                    except Exception as e:
+                        st.error(f"Error técnico al construir el archivo del reporte: {e}")
 
 # --- MÓDULO 4: GESTOR DE REGISTROS HISTÓRICOS ---
 elif menu == "4. Gestor de Registros Históricos":
@@ -480,7 +485,7 @@ elif menu == "5. Reportes y Exportación":
     df_hist = asegurar_calculos_historico(df_hist)
 
     if df_hist.empty:
-        st.error("❌ La hoja 'Datos_Historicos' en Google Sheets se leyó vacía (0 filas). Presione 'Actualizar Datos de la Nube'.")
+        st.error("❌ La hoja 'Datos_Historicos' en Google Sheets se leyó vacía (0 filas).")
     else:
         df_hist["Cedula"] = df_hist["Cedula"].replace("", "S/C")
         df_hist["Nombre"] = df_hist["Nombre"].replace("", "Sin Nombre")
@@ -561,8 +566,7 @@ elif menu == "5. Reportes y Exportación":
                         use_container_width=True,
                     )
 
-                    st.subheader("✍️ Responsables de Firma y Descarga Directa")
-                    st.info("💡 **Nota:** Si utiliza el sistema dentro de Microsoft Teams y el navegador bloquea la descarga directa, abra el enlace de la aplicación en Google Chrome o Microsoft Edge.")
+                    st.subheader("✍️ Responsables de Firma y Descarga de Archivos")
                     col_f1, col_f2 = st.columns(2)
                     with col_f1:
                         elaborado_por = st.text_input("Elaborado por:", value="Lic. Roy F. Esquivel González", key="el_rep")
@@ -571,40 +575,46 @@ elif menu == "5. Reportes y Exportación":
 
                     nombre_limpio_emp = limpiar_nombre_archivo(empresa_sel)
                     subtitulo_rep = f"Reporte Acumulado de Planilla, CCSS y Prestaciones ({mes_inicio} {int(anio_inicio)} - {mes_fin} {int(anio_fin)})"
-                    col_exp1, col_exp2, col_exp3 = st.columns(3)
+                    nom_xlsx = f"Reporte_{nombre_limpio_emp}_{mes_inicio}{int(anio_inicio)}_a_{mes_fin}{int(anio_fin)}.xlsx"
+                    nom_docx = f"Reporte_{nombre_limpio_emp}_{mes_inicio}{int(anio_inicio)}_a_{mes_fin}{int(anio_fin)}.docx"
+                    nom_pdf = f"Reporte_{nombre_limpio_emp}_{mes_inicio}{int(anio_inicio)}_a_{mes_fin}{int(anio_fin)}.pdf"
 
-                    with col_exp1:
+                    try:
                         data_excel = generar_excel_empresa(df_acum, empresa_sel)
-                        st.download_button(
-                            label="🟢 Descargar Excel (.xlsx)",
-                            data=data_excel,
-                            file_name=f"Reporte_{nombre_limpio_emp}_{mes_inicio}{int(anio_inicio)}_a_{mes_fin}{int(anio_fin)}.xlsx",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            key="dl_xlsx_rep"
-                        )
-
-                    with col_exp2:
                         data_word = generar_word_empresa(df_acum, empresa_sel, subtitulo_rep, elaborado_por, revisado_por)
-                        st.download_button(
-                            label="🔵 Descargar Word (.docx)",
-                            data=data_word,
-                            file_name=f"Reporte_{nombre_limpio_emp}_{mes_inicio}{int(anio_inicio)}_a_{mes_fin}{int(anio_fin)}.docx",
-                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                            key="dl_docx_rep"
-                        )
+                        data_pdf = generar_pdf_empresa(df_acum, empresa_sel, subtitulo_rep, elaborado_por, revisado_por)
 
-                    with col_exp3:
-                        data_pdf = generar_pdf_empresa(
-                            df_acum,
-                            empresa_sel,
-                            subtitulo_rep,
-                            elaborado_por,
-                            revisado_por,
-                        )
-                        st.download_button(
-                            label="🔴 Descargar PDF (.pdf)",
-                            data=data_pdf,
-                            file_name=f"Reporte_{nombre_limpio_emp}_{mes_inicio}{int(anio_inicio)}_a_{mes_fin}{int(anio_fin)}.pdf",
-                            mime="application/pdf",
-                            key="dl_pdf_rep"
-                        )
+                        ruta_local = guardar_copia_local_opcional(data_pdf, nom_pdf)
+                        guardar_copia_local_opcional(data_excel, nom_xlsx)
+                        guardar_copia_local_opcional(data_word, nom_docx)
+
+                        if ruta_local:
+                            st.success(f"📂 Copia local guardada automáticamente en: `{ruta_local}`")
+
+                        col_exp1, col_exp2, col_exp3 = st.columns(3)
+                        with col_exp1:
+                            st.download_button(
+                                label="🟢 Descargar Excel (.xlsx)",
+                                data=data_excel,
+                                file_name=nom_xlsx,
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                key="dl_xlsx_rep"
+                            )
+                        with col_exp2:
+                            st.download_button(
+                                label="🔵 Descargar Word (.docx)",
+                                data=data_word,
+                                file_name=nom_docx,
+                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                key="dl_docx_rep"
+                            )
+                        with col_exp3:
+                            st.download_button(
+                                label="🔴 Descargar PDF (.pdf)",
+                                data=data_pdf,
+                                file_name=nom_pdf,
+                                mime="application/pdf",
+                                key="dl_pdf_rep"
+                            )
+                    except Exception as e:
+                        st.error(f"Error técnico al construir los archivos del reporte: {e}")
