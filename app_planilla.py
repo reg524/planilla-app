@@ -1,5 +1,6 @@
 import datetime
 import io
+import re
 import time
 import xml.etree.ElementTree as ET
 import pandas as pd
@@ -46,6 +47,10 @@ COLUMNAS_HISTORICO = [
 def get_gsheet_connection():
     return st.connection("gsheets", type=GSheetsConnection)
 
+def limpiar_nombre_archivo(texto):
+    """Elimina caracteres inválidos para nombres de archivo en Windows/Navegadores"""
+    return re.sub(r'[\\/*?:"<>|]', "_", str(texto)).strip()
+
 def limpiar_numero_serie(serie):
     """Convierte columnas con posibles símbolos, espacios o comas desde Google Sheets a float limpio"""
     return (
@@ -63,7 +68,6 @@ def cargar_datos_gsheet(worksheet_name, columnas_defecto):
     cache_key = f"backup_df_{worksheet_name}"
     conn = get_gsheet_connection()
     
-    # Intentar lectura hasta 2 veces si hay micro-corte de red
     for intento in range(2):
         try:
             df = conn.read(worksheet=worksheet_name, ttl=60)
@@ -78,13 +82,11 @@ def cargar_datos_gsheet(worksheet_name, columnas_defecto):
                     df[col] = df[col].astype(str).replace(["nan", "None", "<NA>", "NaN"], "").str.strip()
             
             df = df.reset_index(drop=True)
-            # Guardar respaldo válido en memoria de sesión
             st.session_state[cache_key] = df.copy()
             return df
         except Exception:
             time.sleep(0.5)
     
-    # Si Google Sheets tarda en responder, usar respaldo en memoria en vez de vaciar la pantalla
     if cache_key in st.session_state and not st.session_state[cache_key].empty:
         return st.session_state[cache_key].copy()
         
@@ -99,7 +101,6 @@ def guardar_datos_gsheet(df, worksheet_name):
                 df_clean[col] = df_clean[col].astype(str).replace(["nan", "None", "<NA>", "NaN"], "").fillna("")
         conn.update(worksheet=worksheet_name, data=df_clean)
         
-        # Actualizar respaldo local inmediato y limpiar caché de lectura
         st.session_state[f"backup_df_{worksheet_name}"] = df_clean.reset_index(drop=True).copy()
         st.cache_data.clear()
         return True
@@ -205,8 +206,9 @@ def obtener_tipo_cambio_compra_bccr(fecha_dt):
 
 def generar_excel_empresa(df_emp, nombre_empresa, elaborado_por, revisado_por):
     output = io.BytesIO()
+    hoja = limpiar_nombre_archivo(nombre_empresa)[:30] or "Reporte"
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        df_emp.to_excel(writer, sheet_name=nombre_empresa[:30], index=False)
+        df_emp.to_excel(writer, sheet_name=hoja, index=False)
     return output.getvalue()
 
 
@@ -220,13 +222,13 @@ def generar_word_empresa(df_emp, nombre_empresa, elaborado_por, revisado_por):
 
     hdr_cells = table.rows[0].cells
     for i, col_name in enumerate(df_emp.columns):
-        hdr_cells[i].text = col_name
+        hdr_cells[i].text = str(col_name)
 
     for _, row in df_emp.iterrows():
         row_cells = table.add_row().cells
-        for i, val in enumerate(row):
+        for i, (col_name, val) in enumerate(zip(df_emp.columns, row)):
             if isinstance(val, float):
-                row_cells[i].text = f"₡{val:,.2f}"
+                row_cells[i].text = f"${val:,.2f}" if "USD" in str(col_name) else f"₡{val:,.2f}"
             else:
                 row_cells[i].text = str(val) if pd.notnull(val) else ""
 
@@ -256,14 +258,14 @@ def generar_pdf_empresa(df_emp, nombre_empresa, titulo_reporte, elaborado_por, r
         'TitleStyle',
         parent=styles['Heading1'],
         fontName='Helvetica-Bold',
-        fontSize=13,
+        fontSize=12,
         alignment=1,
-        spaceAfter=8
+        spaceAfter=6
     )
     style_cell = ParagraphStyle('CellText', fontName='Helvetica', fontSize=6.5, leading=8, alignment=1)
     style_header = ParagraphStyle('HeaderStyle', fontName='Helvetica-Bold', fontSize=6.5, leading=8, textColor=colors.whitesmoke, alignment=1)
 
-    elements.append(Paragraph(f"<b>{nombre_empresa.upper()}</b>", style_title))
+    elements.append(Paragraph(f"<b>{str(nombre_empresa).upper()}</b>", style_title))
     elements.append(Paragraph(f"<b>{titulo_reporte}</b>", style_title))
     elements.append(Spacer(1, 8))
 
@@ -274,14 +276,14 @@ def generar_pdf_empresa(df_emp, nombre_empresa, titulo_reporte, elaborado_por, r
         fila_formateada = []
         for col_name, val in zip(df_emp.columns, row):
             if isinstance(val, float):
-                texto = f"${val:,.2f}" if "USD" in col_name else f"₡{val:,.2f}"
+                texto = f"${val:,.2f}" if "USD" in str(col_name) else f"₡{val:,.2f}"
             else:
                 texto = str(val) if pd.notnull(val) else ""
             fila_formateada.append(Paragraph(texto, style_cell))
         data.append(fila_formateada)
 
-    num_cols = len(df_emp.columns)
-    col_width = (762) / num_cols
+    num_cols = max(len(df_emp.columns), 1)
+    col_width = 762.0 / num_cols
 
     t = Table(data, colWidths=[col_width] * num_cols)
     t.setStyle(
@@ -476,7 +478,6 @@ elif menu == "2. Salarios a Ingresar (Planilla)":
                 format="%.2f"
             )
 
-            # CÁLCULOS TÉCNICOS AUTOMÁTICOS
             if modo == "Semanal":
                 salario_base = monto_digitado * 4.3333
             elif modo == "Quincenal":
@@ -600,8 +601,8 @@ elif menu == "3. Costo CCSS Patronal por Empresa":
         if not empresas_disponibles:
             st.warning("No se encontraron empresas con salarios registrados.")
         else:
-            empresa_sel = st.selectbox("Seleccione la Empresa:", empresas_disponibles)
-            df_emp_base = df_hist[df_hist["Empresa"] == empresa_sel].copy()
+            empresa_sel = st.selectbox("Seleccione la Empresa:", empresas_disponibles, key="ccss_emp_sel")
+            df_emp_base = df_hist[df_hist["Empresa"].str.lower() == empresa_sel.lower()].copy()
 
             st.markdown("#### 📅 Rango de Fechas Mensuales a Calcular")
             anios_disponibles = sorted(df_emp_base["Año_Num"].unique().tolist())
@@ -688,27 +689,40 @@ elif menu == "3. Costo CCSS Patronal por Empresa":
                             use_container_width=True,
                         )
 
-                    st.subheader("✍️ Responsables de Firma para el Reporte")
+                    st.subheader("✍️ Responsables de Firma y Descarga Directa")
                     col_f1, col_f2 = st.columns(2)
                     with col_f1:
-                        elaborado_por = st.text_input("Elaborado por:", value="Lic. Roy F. Esquivel González")
+                        elaborado_por = st.text_input("Elaborado por:", value="Lic. Roy F. Esquivel González", key="el_ccss")
                     with col_f2:
-                        revisado_por = st.text_input("Revisado por:", value="Gerencia General")
+                        revisado_por = st.text_input("Revisado por:", value="Gerencia General", key="rev_ccss")
 
-                    if st.button("📄 Generar Reporte de CCSS en PDF"):
-                        subtitulo = f"Reporte de Pago de Caja (CCSS) | Rango: {mes_inicio} {anio_inicio} a {mes_fin} {anio_fin}"
-                        data_pdf = generar_pdf_empresa(
+                    nombre_limpio_emp = limpiar_nombre_archivo(empresa_sel)
+                    subtitulo_ccss = f"Reporte de Pago de Caja (CCSS) | Rango: {mes_inicio} {anio_inicio} a {mes_fin} {anio_fin}"
+
+                    col_btn1, col_btn2 = st.columns(2)
+                    with col_btn1:
+                        data_pdf_ccss = generar_pdf_empresa(
                             df_ccss_resumen,
                             empresa_sel,
-                            subtitulo,
+                            subtitulo_ccss,
                             elaborado_por,
                             revisado_por,
                         )
                         st.download_button(
                             label="🔴 Descargar Reporte CCSS (.pdf)",
-                            data=data_pdf,
-                            file_name=f"Reporte_CCSS_{empresa_sel}_{mes_inicio}{anio_inicio}_a_{mes_fin}{anio_fin}.pdf",
+                            data=data_pdf_ccss,
+                            file_name=f"Reporte_CCSS_{nombre_limpio_emp}_{mes_inicio}{anio_inicio}_a_{mes_fin}{anio_fin}.pdf",
                             mime="application/pdf",
+                            key="dl_pdf_ccss"
+                        )
+                    with col_btn2:
+                        data_excel_ccss = generar_excel_empresa(df_ccss_resumen, empresa_sel, elaborado_por, revisado_por)
+                        st.download_button(
+                            label="🟢 Descargar Reporte CCSS (.xlsx)",
+                            data=data_excel_ccss,
+                            file_name=f"Reporte_CCSS_{nombre_limpio_emp}_{mes_inicio}{anio_inicio}_a_{mes_fin}{anio_fin}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            key="dl_xlsx_ccss"
                         )
 
 # --- MÓDULO 4: GESTOR DE REGISTROS HISTÓRICOS ---
@@ -763,9 +777,9 @@ elif menu == "5. Reportes y Exportación":
         df_hist["Fecha_Salida"] = df_hist["Fecha_Salida"].replace("", "Activo")
 
         empresas_disponibles = sorted([str(e) for e in df_hist["Empresa"].dropna().unique() if str(e).strip() != ""])
-        empresa_sel = st.selectbox("Seleccione la Empresa a Consultar:", empresas_disponibles)
+        empresa_sel = st.selectbox("Seleccione la Empresa a Consultar:", empresas_disponibles, key="rep_emp_sel")
 
-        df_emp_base = df_hist[df_hist["Empresa"] == empresa_sel].copy()
+        df_emp_base = df_hist[df_hist["Empresa"].str.lower() == empresa_sel.lower()].copy()
 
         st.markdown("#### 📅 Rango de Fechas Mensuales a Consultar")
         anios_disponibles = sorted(df_emp_base["Año_Num"].unique().tolist())
@@ -835,13 +849,14 @@ elif menu == "5. Reportes y Exportación":
                     use_container_width=True,
                 )
 
-                st.subheader("✍️ Responsables de Firma para los Reportes")
+                st.subheader("✍️ Responsables de Firma y Descarga Directa")
                 col_f1, col_f2 = st.columns(2)
                 with col_f1:
                     elaborado_por = st.text_input("Elaborado por:", value="Lic. Roy F. Esquivel González", key="el_rep")
                 with col_f2:
                     revisado_por = st.text_input("Revisado por:", value="Gerencia General", key="rev_rep")
 
+                nombre_limpio_emp = limpiar_nombre_archivo(empresa_sel)
                 col_exp1, col_exp2, col_exp3 = st.columns(3)
 
                 with col_exp1:
@@ -849,8 +864,9 @@ elif menu == "5. Reportes y Exportación":
                     st.download_button(
                         label="🟢 Descargar Excel (.xlsx)",
                         data=data_excel,
-                        file_name=f"Reporte_{empresa_sel}_{mes_inicio}{anio_inicio}_a_{mes_fin}{anio_fin}.xlsx",
+                        file_name=f"Reporte_{nombre_limpio_emp}_{mes_inicio}{anio_inicio}_a_{mes_fin}{anio_fin}.xlsx",
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="dl_xlsx_rep"
                     )
 
                 with col_exp2:
@@ -858,8 +874,9 @@ elif menu == "5. Reportes y Exportación":
                     st.download_button(
                         label="🔵 Descargar Word (.docx)",
                         data=data_word,
-                        file_name=f"Reporte_{empresa_sel}_{mes_inicio}{anio_inicio}_a_{mes_fin}{anio_fin}.docx",
+                        file_name=f"Reporte_{nombre_limpio_emp}_{mes_inicio}{anio_inicio}_a_{mes_fin}{anio_fin}.docx",
                         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        key="dl_docx_rep"
                     )
 
                 with col_exp3:
@@ -873,6 +890,7 @@ elif menu == "5. Reportes y Exportación":
                     st.download_button(
                         label="🔴 Descargar PDF (.pdf)",
                         data=data_pdf,
-                        file_name=f"Reporte_{empresa_sel}_{mes_inicio}{anio_inicio}_a_{mes_fin}{anio_fin}.pdf",
+                        file_name=f"Reporte_{nombre_limpio_emp}_{mes_inicio}{anio_inicio}_a_{mes_fin}{anio_fin}.pdf",
                         mime="application/pdf",
+                        key="dl_pdf_rep"
                     )
