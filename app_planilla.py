@@ -2,6 +2,8 @@ import datetime
 import pandas as pd
 import streamlit as st
 from reportes_planilla import (
+    COLUMNAS_EMPLEADOS,
+    COLUMNAS_EMPRESAS,
     COLUMNAS_HISTORICO,
     MESES,
     MESES_MAP,
@@ -12,6 +14,7 @@ from reportes_planilla import (
     PORCENTAJE_VACACIONES,
     asegurar_calculos_historico,
     cargar_datos_gsheet,
+    generar_backup_completo_excel,
     generar_excel_empresa,
     generar_pdf_empresa,
     generar_word_empresa,
@@ -19,6 +22,7 @@ from reportes_planilla import (
     guardar_datos_gsheet,
     limpiar_nombre_archivo,
     obtener_tipo_cambio_compra_bccr,
+    restaurar_backup_completo_excel,
 )
 
 st.set_page_config(
@@ -61,6 +65,7 @@ menu = st.sidebar.radio(
         "3. Costo CCSS Patronal por Empresa",
         "4. Gestor de Registros Históricos",
         "5. Reportes y Exportación",
+        "6. Respaldo y Restauración (Backup)",
     ],
 )
 
@@ -69,8 +74,8 @@ if menu == "1. Catálogo de Empresas y Empleados":
     st.title("1. Administración de Empresas y Colaboradores")
     st.caption("Presione Enter o haga clic fuera de la celda antes de presionar 'Sincronizar'.")
 
-    df_emp = cargar_datos_gsheet("Empresas", ["Empresa", "Cedula_Juridica", "Contacto"])
-    df_empld = cargar_datos_gsheet("Empleados", ["Empresa", "Cedula", "Nombre", "Puesto", "Fecha_Ingreso", "Fecha_Salida"])
+    df_emp = cargar_datos_gsheet("Empresas", COLUMNAS_EMPRESAS)
+    df_empld = cargar_datos_gsheet("Empleados", COLUMNAS_EMPLEADOS)
 
     tab1, tab2 = st.tabs(["🏢 Catálogo de Empresas", "👤 Padrón de Empleados por Empresa"])
 
@@ -132,8 +137,7 @@ if menu == "1. Catálogo de Empresas y Empleados":
                 df_otros = df_empld[df_empld["Empresa"] != emp_sel_padron].copy()
                 df_sub_clean["Empresa"] = emp_sel_padron
                 
-                cols_finales = ["Empresa", "Cedula", "Nombre", "Puesto", "Fecha_Ingreso", "Fecha_Salida"]
-                df_final_empld = pd.concat([df_otros, df_sub_clean], ignore_index=True)[cols_finales]
+                df_final_empld = pd.concat([df_otros, df_sub_clean], ignore_index=True)[COLUMNAS_EMPLEADOS]
                 
                 if guardar_datos_gsheet(df_final_empld, "Empleados"):
                     st.success(f"✅ Personal de **{emp_sel_padron}** sincronizado ({len(df_sub_clean)} colaboradores guardados).")
@@ -144,8 +148,8 @@ elif menu == "2. Salarios a Ingresar (Planilla)":
     st.title("2. Salarios a Ingresar")
     st.caption("Alimentación de salarios con sincronización remota instantánea.")
 
-    df_emp = cargar_datos_gsheet("Empresas", ["Empresa", "Cedula_Juridica", "Contacto"])
-    df_empld = cargar_datos_gsheet("Empleados", ["Empresa", "Cedula", "Nombre", "Puesto", "Fecha_Ingreso", "Fecha_Salida"])
+    df_emp = cargar_datos_gsheet("Empresas", COLUMNAS_EMPRESAS)
+    df_empld = cargar_datos_gsheet("Empleados", COLUMNAS_EMPLEADOS)
 
     empresas_list = sorted([str(e) for e in df_emp["Empresa"].dropna().unique() if str(e).strip() != ""])
 
@@ -433,17 +437,21 @@ elif menu == "3. Costo CCSS Patronal por Empresa":
                     subtitulo_ccss = f"Reporte de Pago de Caja (CCSS) | Rango: {mes_inicio} {int(anio_inicio)} a {mes_fin} {int(anio_fin)}"
                     nom_pdf = f"Reporte_CCSS_{nombre_limpio_emp}_{mes_inicio}{int(anio_inicio)}_a_{mes_fin}{int(anio_fin)}.pdf"
                     nom_xlsx = f"Reporte_CCSS_{nombre_limpio_emp}_{mes_inicio}{int(anio_inicio)}_a_{mes_fin}{int(anio_fin)}.xlsx"
+                    nom_docx = f"Reporte_CCSS_{nombre_limpio_emp}_{mes_inicio}{int(anio_inicio)}_a_{mes_fin}{int(anio_fin)}.docx"
 
                     try:
                         data_pdf_ccss = generar_pdf_empresa(df_ccss_resumen, empresa_sel, subtitulo_ccss, elaborado_por, revisado_por)
                         data_excel_ccss = generar_excel_empresa(df_ccss_resumen, empresa_sel)
+                        data_word_ccss = generar_word_empresa(df_ccss_resumen, empresa_sel, subtitulo_ccss, elaborado_por, revisado_por)
+
                         ruta_local = guardar_copia_local_opcional(data_pdf_ccss, nom_pdf)
                         guardar_copia_local_opcional(data_excel_ccss, nom_xlsx)
+                        guardar_copia_local_opcional(data_word_ccss, nom_docx)
 
                         if ruta_local:
                             st.success(f"📂 Copia local guardada automáticamente en: `{ruta_local}`")
 
-                        col_btn1, col_btn2 = st.columns(2)
+                        col_btn1, col_btn2, col_btn3 = st.columns(3)
                         with col_btn1:
                             st.download_button(
                                 label="🔴 Descargar Reporte CCSS (.pdf)",
@@ -459,6 +467,14 @@ elif menu == "3. Costo CCSS Patronal por Empresa":
                                 file_name=nom_xlsx,
                                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                                 key="dl_xlsx_ccss"
+                            )
+                        with col_btn3:
+                            st.download_button(
+                                label="🔵 Descargar Reporte CCSS (.docx)",
+                                data=data_word_ccss,
+                                file_name=nom_docx,
+                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                key="dl_docx_ccss"
                             )
                     except Exception as e:
                         st.error(f"Error técnico al construir el archivo del reporte: {e}")
@@ -646,3 +662,64 @@ elif menu == "5. Reportes y Exportación":
                             )
                     except Exception as e:
                         st.error(f"Error técnico al construir los archivos del reporte: {e}")
+
+# --- MÓDULO 6: RESPALDO Y RESTAURACIÓN (BACKUP) ---
+elif menu == "6. Respaldo y Restauración (Backup)":
+    st.title("6. Respaldo y Restauración de Base de Datos (Backup)")
+    st.caption("Genere copias de seguridad completas del proyecto o restaure un respaldo previo en Google Sheets.")
+
+    tab_bkp1, tab_bkp2 = st.tabs(["📥 Generar y Descargar Respaldo (Backup)", "📤 Restaurar Respaldo en el Proyecto"])
+
+    with tab_bkp1:
+        st.subheader("Copia de Seguridad Completa del Sistema")
+        st.write(
+            "Este respaldo descarga un único archivo Excel (`.xlsx`) que contiene de forma íntegra las tres bases de datos del proyecto: "
+            "**Empresas**, **Empleados** y **Datos_Historicos**."
+        )
+
+        fecha_hoy_str = datetime.datetime.now().strftime("%Y%m%d_%H%M")
+        nombre_bkp = f"Backup_Planilla_Completo_{fecha_hoy_str}.xlsx"
+
+        try:
+            bytes_backup = generar_backup_completo_excel()
+            ruta_bkp_local = guardar_copia_local_opcional(bytes_backup, nombre_bkp)
+            if ruta_bkp_local:
+                st.info(f"💾 Copia de seguridad guardada también en tu equipo: `{ruta_bkp_local}`")
+
+            st.download_button(
+                label="📦 Descargar Respaldo Completo (.xlsx)",
+                data=bytes_backup,
+                file_name=nombre_bkp,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+                key="btn_descargar_backup"
+            )
+        except Exception as e:
+            st.error(f"No se pudo generar el respaldo: {e}")
+
+    with tab_bkp2:
+        st.subheader("Restaurar Respaldo en el Mismo Proyecto")
+        st.error(
+            "⚠️ **ADVERTENCIA CRÍTICA:** Al subir y restaurar un archivo de respaldo, **ESTO BORRARÁ Y SOBRESCRIBIRÁ TODOS LOS ARCHIVOS Y REGISTROS ELABORADOS ANTES DEL BACKUP** en Google Sheets (Empresas, Empleados y Datos Históricos)."
+        )
+
+        archivo_bkp = st.file_uploader(
+            "Seleccione el archivo de respaldo (.xlsx) generado previamente por este sistema:",
+            type=["xlsx"],
+            key="uploader_backup"
+        )
+
+        if archivo_bkp is not None:
+            confirmar_borrado = st.checkbox(
+                "Entiendo y acepto que esta acción borrará los datos actuales elaborados antes del backup y los reemplazará con el archivo seleccionado.",
+                key="chk_confirmar_backup"
+            )
+
+            if st.button("🔄 Restaurar Respaldo Automáticamente en el Proyecto", disabled=not confirmar_borrado, type="primary"):
+                with st.spinner("Restaurando bases de datos en Google Sheets..."):
+                    exito, mensaje = restaurar_backup_completo_excel(archivo_bkp)
+                    if exito:
+                        st.success(f"✅ {mensaje}")
+                        st.balloons()
+                    else:
+                        st.error(f"❌ {mensaje}")
